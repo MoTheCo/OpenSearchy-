@@ -1,6 +1,6 @@
 import { el } from "/js/dom.js";
 import { streamChat } from "/js/llm.js";
-import { bindModelSelect, fillModelSelect, readModel } from "/js/models.js";
+import { MODEL_CATALOG, bindModelSelect, fillModelSelect, readModel } from "/js/models.js";
 import { retrieveSources } from "/js/rag.js";
 import { requireVault } from "/js/settings.js";
 import { isUnlocked, saveVault, vaultData } from "/js/vault.js";
@@ -27,9 +27,16 @@ const providerSelect = document.getElementById("chat-provider");
 const modelSelect = document.getElementById("chat-model");
 const modelCustom = document.getElementById("chat-model-custom");
 
+const MENTION = /(^|\s)@([^\s@]*)$/;
+
 let history = [];
 let busy = false;
 let currentSources = [];
+let firstMentionPick = null;
+
+const mentionMenu = el("div", "mention-menu");
+mentionMenu.hidden = true;
+form.append(mentionMenu);
 
 export function initChat() {
   newChatBtn.addEventListener("click", resetChat);
@@ -39,8 +46,26 @@ export function initChat() {
   agentSelect.addEventListener("change", updateSubmit);
   providerSelect.addEventListener("change", () => fillModelSelect(modelSelect, modelCustom, providerSelect.value, ""));
   bindModelSelect(modelSelect, modelCustom);
-  input.addEventListener("input", updateSubmit);
+  input.addEventListener("input", () => {
+    updateSubmit();
+    updateMention();
+  });
+  input.addEventListener("blur", () => {
+    mentionMenu.hidden = true;
+  });
   input.addEventListener("keydown", (event) => {
+    if (!mentionMenu.hidden) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        mentionMenu.hidden = true;
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        firstMentionPick?.();
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       form.requestSubmit();
@@ -53,7 +78,7 @@ export function initChat() {
 }
 
 function fillAgents() {
-  const agents = isUnlocked() ? vaultData().agents : [];
+  const agents = isUnlocked() ? usableAgents(vaultData()) : [];
   const previous = agentSelect.value;
   agentSelect.replaceChildren(
     el("option", null, "Direkt (ohne Agent)", { value: "" }),
@@ -64,8 +89,9 @@ function fillAgents() {
   updateSubmit();
 }
 
+// Nur Provider mit hinterlegtem API-Key sind im Chat wählbar.
 function fillDirect() {
-  const providers = isUnlocked() ? vaultData().providers : [];
+  const providers = isUnlocked() ? vaultData().providers.filter((provider) => provider.apiKey) : [];
   const previousProvider = providerSelect.value;
   const previousModel = readModel(modelSelect, modelCustom);
   providerSelect.replaceChildren(...providers.map((provider) => el("option", null, provider.name, { value: provider.id })));
@@ -77,6 +103,84 @@ function fillDirect() {
 function updateSubmit() {
   directBar.hidden = Boolean(agentSelect.value);
   submitBtn.disabled = busy || !input.value.trim();
+}
+
+// Agent ist nutzbar, wenn er einen eigenen Key oder einen Provider mit Key hat.
+function usableAgents(data) {
+  return data.agents.filter((agent) => agent.apiKey || data.providers.find((item) => item.id === agent.providerId)?.apiKey);
+}
+
+function updateMention() {
+  const match = input.value.slice(0, input.selectionStart).match(MENTION);
+  if (!match) {
+    mentionMenu.hidden = true;
+    return;
+  }
+  renderMentionMenu(match[2].toLowerCase());
+}
+
+function renderMentionMenu(query) {
+  const data = isUnlocked() ? vaultData() : { providers: [], agents: [] };
+  const keyed = data.providers.filter((provider) => provider.apiKey);
+  firstMentionPick = null;
+
+  const modelCol = el("div", "mention-col");
+  modelCol.append(el("h3", null, "Modelle"));
+  for (const provider of keyed) {
+    const models = MODEL_CATALOG[provider.id] ?? [];
+    const matching = models.filter((model) => `${provider.name} ${model}`.toLowerCase().includes(query));
+    const custom = !models.length && provider.name.toLowerCase().includes(query);
+    if (!matching.length && !custom) continue;
+    modelCol.append(el("div", "mention-group", provider.name));
+    for (const model of matching) addMentionItem(modelCol, model, () => pickModel(provider.id, model));
+    if (custom) addMentionItem(modelCol, "Eigene Modell-ID …", () => pickModel(provider.id, ""));
+  }
+  if (!keyed.length) modelCol.append(el("p", "hint", "Kein API-Key hinterlegt. Bitte in den Einstellungen eintragen."));
+  else if (!firstMentionPick) modelCol.append(el("p", "hint", "Keine passenden Modelle."));
+
+  const agentCol = el("div", "mention-col");
+  agentCol.append(el("h3", null, "Agenten"));
+  const agents = usableAgents(data).filter((agent) => agent.name.toLowerCase().includes(query));
+  for (const agent of agents) addMentionItem(agentCol, agent.name, () => pickAgent(agent.id));
+  if (!agents.length) agentCol.append(el("p", "hint", "Keine passenden Agenten."));
+
+  mentionMenu.replaceChildren(modelCol, agentCol);
+  mentionMenu.hidden = false;
+}
+
+function addMentionItem(parent, label, pick) {
+  const item = el("button", "mention-item", label, { type: "button" });
+  // mousedown statt click, damit das Textfeld den Fokus behält.
+  item.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    pick();
+  });
+  parent.append(item);
+  firstMentionPick ??= pick;
+}
+
+function pickModel(providerId, model) {
+  agentSelect.value = "";
+  providerSelect.value = providerId;
+  fillModelSelect(modelSelect, modelCustom, providerId, model);
+  modelSelect.dispatchEvent(new Event("change"));
+  finishMention();
+}
+
+function pickAgent(agentId) {
+  agentSelect.value = agentId;
+  finishMention();
+}
+
+// Entfernt den @-Suchtext vor dem Cursor und aktualisiert die Oberfläche.
+function finishMention() {
+  const cursor = input.selectionStart;
+  const before = input.value.slice(0, cursor).replace(/@[^\s@]*$/, "");
+  input.value = before + input.value.slice(cursor);
+  input.setSelectionRange(before.length, before.length);
+  mentionMenu.hidden = true;
+  updateSubmit();
+  input.focus();
 }
 
 function resetChat() {
