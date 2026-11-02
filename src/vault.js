@@ -1,4 +1,5 @@
 const STORAGE_KEY = "opensearchy.vault";
+const SESSION_KEY = "opensearchy.session";
 const FORMAT = "opensearchy-vault";
 const VERSION = 1;
 const ITERATIONS = 600000;
@@ -27,20 +28,29 @@ function emptyData() {
   return { providers: [], prompts: [], agents: [] };
 }
 
-async function deriveKey(password, salt, iterations) {
-  const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
-  return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations, hash: "SHA-256" },
-    material,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
+async function deriveRaw(password, salt, iterations) {
+  const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations, hash: "SHA-256" }, material, 256);
+  return new Uint8Array(bits);
+}
+
+function aesKey(raw) {
+  return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }
 
 async function newSession(password) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  return { key: await deriveKey(password, salt, ITERATIONS), salt, iterations: ITERATIONS };
+  const raw = await deriveRaw(password, salt, ITERATIONS);
+  return { key: await aesKey(raw), raw, salt, iterations: ITERATIONS };
+}
+
+// Hält den abgeleiteten Schlüssel für den Tab, bis er geschlossen wird (sessionStorage).
+function saveSession() {
+  if (!session) return;
+  sessionStorage.setItem(
+    SESSION_KEY,
+    JSON.stringify({ raw: toBase64(session.raw), salt: toBase64(session.salt), iterations: session.iterations })
+  );
 }
 
 async function seal() {
@@ -73,7 +83,8 @@ async function openEnvelope(text, password) {
   }
 
   const salt = fromBase64(envelope.kdf.salt);
-  const key = await deriveKey(password, salt, envelope.kdf.iterations);
+  const raw = await deriveRaw(password, salt, envelope.kdf.iterations);
+  const key = await aesKey(raw);
   let plain;
   try {
     plain = await crypto.subtle.decrypt(
@@ -85,7 +96,7 @@ async function openEnvelope(text, password) {
     throw new Error("Master-Passwort falsch oder Daten beschädigt.");
   }
   return {
-    session: { key, salt, iterations: envelope.kdf.iterations },
+    session: { key, raw, salt, iterations: envelope.kdf.iterations },
     data: { ...emptyData(), ...JSON.parse(decoder.decode(plain)) },
   };
 }
@@ -114,12 +125,39 @@ export async function createVault(password) {
   session = await newSession(password);
   data = { ...emptyData(), providers: DEFAULT_PROVIDERS.map((provider) => ({ ...provider })) };
   await persist();
+  saveSession();
 }
 
 export async function unlockVault(password) {
   const opened = await openEnvelope(localStorage.getItem(STORAGE_KEY), password);
   session = opened.session;
   data = opened.data;
+  saveSession();
+}
+
+// Stellt die Sitzung aus sessionStorage wieder her, ohne erneut nach dem Passwort zu fragen.
+export async function restoreVault() {
+  if (session) return true;
+  const saved = sessionStorage.getItem(SESSION_KEY);
+  const text = localStorage.getItem(STORAGE_KEY);
+  if (!saved || !text) return false;
+  try {
+    const stored = JSON.parse(saved);
+    const raw = fromBase64(stored.raw);
+    const key = await aesKey(raw);
+    const envelope = JSON.parse(text);
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: fromBase64(envelope.cipher.iv) },
+      key,
+      fromBase64(envelope.data)
+    );
+    session = { key, raw, salt: fromBase64(stored.salt), iterations: stored.iterations };
+    data = { ...emptyData(), ...JSON.parse(decoder.decode(plain)) };
+    return true;
+  } catch {
+    sessionStorage.removeItem(SESSION_KEY);
+    return false;
+  }
 }
 
 export async function importVault(text, password) {
@@ -127,6 +165,7 @@ export async function importVault(text, password) {
   session = opened.session;
   data = opened.data;
   await persist();
+  saveSession();
 }
 
 export async function saveVault() {
@@ -136,11 +175,13 @@ export async function saveVault() {
 export async function changePassword(password) {
   session = await newSession(password);
   await persist();
+  saveSession();
 }
 
 export function lockVault() {
   session = null;
   data = null;
+  sessionStorage.removeItem(SESSION_KEY);
 }
 
 export function forgetVault() {

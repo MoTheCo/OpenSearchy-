@@ -1,4 +1,5 @@
 import { initChat } from "/js/chat.js";
+import { restoreVault } from "/js/vault.js";
 import { initSettings } from "/js/settings.js";
 import { initViews, showView } from "/js/views.js";
 
@@ -452,3 +453,6 @@ initSettings();
 initChat();
 initViews();
 runFromUrl();
+restoreVault().then((restored) => {
+  if (restored) window.dispatchEvent(new Event("vault-changed"));
+});

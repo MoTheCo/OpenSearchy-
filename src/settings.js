@@ -9,6 +9,7 @@ import {
   importVault,
   isUnlocked,
   lockVault,
+  restoreVault,
   saveVault,
   unlockVault,
   vaultData,
@@ -72,8 +73,8 @@ export function initSettings() {
 }
 
 // Liefert true, sobald der Speicher entsperrt bzw. neu angelegt ist.
-export function requireVault() {
-  if (isUnlocked()) return Promise.resolve(true);
+export async function requireVault() {
+  if (isUnlocked() || (await restoreVault())) return true;
   const creating = !hasStoredVault();
   $("master-title").textContent = creating ? "Master-Passwort festlegen" : "Master-Passwort";
   $("master-text").textContent = creating
