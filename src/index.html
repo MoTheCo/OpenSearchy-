@@ -129,6 +129,27 @@
       </div>
     </div>
   </div>
+  <div class="modal" id="master-key-modal" hidden>
+    <div class="modal-content small">
+      <h2 id="master-title">Master-Passwort</h2>
+      <p id="master-text"></p>
+      <form id="master-key-form">
+        <div class="form-group">
+          <label for="master-password">Passwort</label>
+          <input type="password" id="master-password" required autocomplete="current-password" minlength="1">
+        </div>
+        <div class="form-group" id="master-confirm-field" hidden>
+          <label for="master-password-confirm">Passwort wiederholen</label>
+          <input type="password" id="master-password-confirm" autocomplete="new-password">
+        </div>
+        <p class="form-error" id="master-error" hidden></p>
+        <div class="form-actions">
+          <button type="button" class="btn-secondary" id="master-cancel">Abbrechen</button>
+          <button type="submit" class="btn-primary" id="master-submit">Entsperren</button>
+        </div>
+      </form>
+    </div>
+  </div>
   <script type="module" src="/app.js"></script>
 </body>
 </html>
