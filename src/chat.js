@@ -204,7 +204,17 @@ async function renderMentionMenu(query) {
 
   const agentCol = el("div", "mention-col");
   agentCol.append(el("h3", null, "Agenten"));
-  const agents = usableAgents(data).filter((agent) => agent.name.toLowerCase().includes(query));
+  const usable = usableAgents(data);
+  const recentAgents = readJson(RECENT_KEY, [])
+    .filter((item) => item.agentId && isUnlocked() && targetExists(item))
+    .map((item) => usable.find((agent) => agent.id === item.agentId))
+    .filter((agent) => agent && agent.name.toLowerCase().includes(query));
+  if (recentAgents.length) {
+    agentCol.append(el("div", "mention-group", "Zuletzt verwendet"));
+    for (const agent of recentAgents) addMentionItem(agentCol, agent.name, () => pickAgent(agent.id));
+  }
+  const agents = usable.filter((agent) => agent.name.toLowerCase().includes(query));
+  if (agents.length) agentCol.append(el("div", "mention-group", "Alle Agenten"));
   for (const agent of agents) addMentionItem(agentCol, agent.name, () => pickAgent(agent.id));
   if (!agents.length) agentCol.append(el("p", "hint", "Keine passenden Agenten."));
   agentCol.append(makeMentionItem("＋ Neuer Agent …", () => {
