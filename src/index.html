@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenSearchy</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <header>
+      <h1>OpenSearchy</h1>
+      <button id="settings-btn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙</button>
+    </header>
+    <div class="main-content">
+      <section class="search-panel">
+        <form role="search" action="/" method="get" id="search-form">
+          <input type="search" name="q" placeholder="Wikipedia durchsuchen …" autocomplete="off" required>
+          <button type="submit">Suchen</button>
+        </form>
+        <nav class="tabs" aria-label="Ansicht">
+          <button type="button" class="tab-btn active" data-view="search" aria-pressed="true">Suche</button>
+          <button type="button" class="tab-btn" data-view="chat" aria-pressed="false">Chat</button>
+          <button type="button" class="tab-btn" data-view="sources" aria-pressed="false">Quellen <span id="sources-count"></span></button>
+        </nav>
+        <div id="view-search">
+          <p id="status"></p>
+          <ol id="results"></ol>
+          <a class="more" id="more" href="#" hidden>Weitere Ergebnisse</a>
+        </div>
+      </section>
+      <aside class="chat-panel" id="chat-panel" hidden>
+        <div class="chat-header">
+          <h2>Chat</h2>
+          <div class="chat-controls">
+            <select id="agent-select" aria-label="Agent wählen"></select>
+            <button id="new-chat-btn" class="icon-btn" title="Neuer Chat" aria-label="Neuer Chat">＋</button>
+          </div>
+        </div>
+        <form class="chat-key-form" id="chat-key-form" hidden>
+          <p class="hint">Für diesen Agenten ist noch kein API-Key hinterlegt.</p>
+          <div class="chat-key-row">
+            <input type="password" id="chat-key-input" placeholder="API-Key eingeben" autocomplete="off" aria-label="API-Key">
+            <button type="submit" class="btn-primary">Speichern</button>
+          </div>
+        </form>
+        <div class="chat-messages" id="chat-messages"></div>
+        <form class="chat-input-form" id="chat-form">
+          <textarea id="chat-input" placeholder="Frage stellen…" rows="1" aria-label="Nachricht"></textarea>
+          <button type="submit" id="chat-submit" disabled>Senden</button>
+        </form>
+      </aside>
+      <aside class="sources-panel" id="sources-panel" hidden></aside>
+    </div>
+  </div>
+  <div class="modal" id="settings-modal" hidden>
+    <div class="modal-content">
+      <h2>Einstellungen</h2>
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="agents">Agenten</button>
+        <button class="tab-btn" data-tab="providers">Provider</button>
+        <button class="tab-btn" data-tab="prompts">Prompts</button>
+        <button class="tab-btn" data-tab="security">Sicherheit</button>
+      </div>
+      <div class="tab-panels">
+        <div class="tab-panel" id="tab-agents"></div>
+        <div class="tab-panel" id="tab-providers" hidden></div>
+        <div class="tab-panel" id="tab-prompts" hidden></div>
+        <div class="tab-panel" id="tab-security" hidden></div>
+      </div>
+      <button class="modal-close" id="settings-close">Schließen</button>
+    </div>
+  </div>
+  <div class="modal" id="agent-modal" hidden>
+    <div class="modal-content">
+      <h2 id="agent-modal-title">Agent erstellen</h2>
+      <form id="agent-form">
+        <input type="hidden" id="agent-id">
+        <div class="form-group">
+          <label for="agent-name">Name</label>
+          <input type="text" id="agent-name" required>
+        </div>
+        <div class="form-group">
+          <label for="agent-provider">Provider</label>
+          <select id="agent-provider" required></select>
+        </div>
+        <div class="form-group">
+          <label for="agent-model">Modell</label>
+          <input type="text" id="agent-model" required placeholder="z.B. gpt-4o, claude-3-5-sonnet">
+        </div>
+        <div class="form-group">
+          <label for="agent-api-key">API Key</label>
+          <input type="password" id="agent-api-key" placeholder="Wird verschlüsselt gespeichert">
+        </div>
+        <div class="form-group">
+          <label for="agent-base-url">Base URL (optional)</label>
+          <input type="url" id="agent-base-url" placeholder="https://api.openai.com/v1">
+        </div>
+        <div class="form-group">
+          <label for="agent-prompt-template">Prompt-Vorlage</label>
+          <select id="agent-prompt-template"></select>
+        </div>
+        <div class="form-group">
+          <label for="agent-system-prompt">System Prompt</label>
+          <textarea id="agent-system-prompt" rows="6" placeholder="Du bist ein hilfreicher Assistent..."></textarea>
+        </div>
+        <div class="form-group">
+          <label for="agent-temperature">Temperature</label>
+          <input type="range" id="agent-temperature" min="0" max="2" step="0.1" value="0.7">
+          <span id="temperature-value">0.7</span>
+        </div>
+        <div class="form-group">
+          <label for="agent-max-tokens">Max Tokens</label>
+          <input type="number" id="agent-max-tokens" value="4000" min="100" max="128000">
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn-secondary" id="agent-cancel">Abbrechen</button>
+          <button type="submit" class="btn-primary">Speichern</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <div class="modal" id="confirm-modal" hidden>
+    <div class="modal-content small">
+      <p id="confirm-message"></p>
+      <div class="form-actions">
+        <button type="button" class="btn-secondary" id="confirm-cancel">Abbrechen</button>
+        <button type="button" class="btn-danger" id="confirm-ok">Löschen</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal" id="master-key-modal" hidden>
+    <div class="modal-content small">
+      <h2 id="master-title">Master-Passwort</h2>
+      <p id="master-text"></p>
+      <form id="master-key-form">
+        <div class="form-group">
+          <label for="master-password">Passwort</label>
+          <input type="password" id="master-password" required autocomplete="current-password" minlength="1">
+        </div>
+        <div class="form-group" id="master-confirm-field" hidden>
+          <label for="master-password-confirm">Passwort wiederholen</label>
+          <input type="password" id="master-password-confirm" autocomplete="new-password">
+        </div>
+        <p class="form-error" id="master-error" hidden></p>
+        <div class="form-actions">
+          <button type="button" class="btn-secondary" id="master-cancel">Abbrechen</button>
+          <button type="submit" class="btn-primary" id="master-submit">Entsperren</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
