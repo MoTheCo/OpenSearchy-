@@ -1,9 +1,9 @@
 import { el } from "/js/dom.js";
 import { streamChat } from "/js/llm.js";
-import { MODEL_CATALOG, bindModelSelect, fillModelSelect, readModel } from "/js/models.js";
+import { MODEL_CATALOG } from "/js/models.js";
 import { retrieveSources } from "/js/rag.js";
-import { requireVault } from "/js/settings.js";
-import { isUnlocked, saveVault, vaultData } from "/js/vault.js";
+import { openNewAgent, requireVault } from "/js/settings.js";
+import { isUnlocked, vaultData } from "/js/vault.js";
 
 const GROUNDING_WITH_SOURCES =
   "Antworte auf Deutsch. Stütze dich auf die Wikipedia-Auszüge und kennzeichne Aussagen mit der Quellennummer, z. B. [1]. Wenn die Auszüge die Frage nicht beantworten, sag das ausdrücklich.";
@@ -20,12 +20,7 @@ const messagesEl = document.getElementById("chat-messages");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("chat-input");
 const submitBtn = document.getElementById("chat-submit");
-const agentSelect = document.getElementById("agent-select");
 const newChatBtn = document.getElementById("new-chat-btn");
-const directBar = document.getElementById("chat-direct");
-const providerSelect = document.getElementById("chat-provider");
-const modelSelect = document.getElementById("chat-model");
-const modelCustom = document.getElementById("chat-model-custom");
 
 const MENTION = /(^|\s)@([^\s@]*)$/;
 
@@ -33,6 +28,8 @@ let history = [];
 let busy = false;
 let currentSources = [];
 let firstMentionPick = null;
+// Gewähltes Ziel: { agentId } oder { providerId, model }; wird nur über das @-Menü gesetzt.
+let target = null;
 
 const mentionMenu = el("div", "mention-menu");
 mentionMenu.hidden = true;
@@ -40,12 +37,6 @@ form.append(mentionMenu);
 
 export function initChat() {
   newChatBtn.addEventListener("click", resetChat);
-  window.addEventListener("view-changed", (event) => {
-    if (event.detail === "chat") fillAgents();
-  });
-  agentSelect.addEventListener("change", updateSubmit);
-  providerSelect.addEventListener("change", () => fillModelSelect(modelSelect, modelCustom, providerSelect.value, ""));
-  bindModelSelect(modelSelect, modelCustom);
   input.addEventListener("input", () => {
     updateSubmit();
     updateMention();
@@ -72,36 +63,22 @@ export function initChat() {
     }
   });
   form.addEventListener("submit", onSubmit);
-  window.addEventListener("vault-changed", fillAgents);
+  window.addEventListener("vault-changed", dropStaleTarget);
   renderSources([]);
-  fillAgents();
 }
 
-function fillAgents() {
-  const agents = isUnlocked() ? usableAgents(vaultData()) : [];
-  const previous = agentSelect.value;
-  agentSelect.replaceChildren(
-    el("option", null, "Direkt (ohne Agent)", { value: "" }),
-    ...agents.map((agent) => el("option", null, agent.name, { value: agent.id }))
-  );
-  agentSelect.value = agents.some((agent) => agent.id === previous) ? previous : "";
-  fillDirect();
+// Entfernt das Ziel, wenn Agent oder Provider inzwischen gelöscht wurden.
+function dropStaleTarget() {
+  if (!target) return;
+  const data = isUnlocked() ? vaultData() : { providers: [], agents: [] };
+  const exists = target.agentId
+    ? data.agents.some((agent) => agent.id === target.agentId)
+    : data.providers.some((provider) => provider.id === target.providerId);
+  if (!exists) target = null;
   updateSubmit();
 }
 
-// Nur Provider mit hinterlegtem API-Key sind im Chat wählbar.
-function fillDirect() {
-  const providers = isUnlocked() ? vaultData().providers.filter((provider) => provider.apiKey) : [];
-  const previousProvider = providerSelect.value;
-  const previousModel = readModel(modelSelect, modelCustom);
-  providerSelect.replaceChildren(...providers.map((provider) => el("option", null, provider.name, { value: provider.id })));
-  if (providers.some((provider) => provider.id === previousProvider)) providerSelect.value = previousProvider;
-  const sameProvider = providerSelect.value === previousProvider;
-  fillModelSelect(modelSelect, modelCustom, providerSelect.value, sameProvider ? previousModel : "");
-}
-
 function updateSubmit() {
-  directBar.hidden = Boolean(agentSelect.value);
   submitBtn.disabled = busy || !input.value.trim();
 }
 
@@ -133,7 +110,7 @@ function renderMentionMenu(query) {
     if (!matching.length && !custom) continue;
     modelCol.append(el("div", "mention-group", provider.name));
     for (const model of matching) addMentionItem(modelCol, model, () => pickModel(provider.id, model));
-    if (custom) addMentionItem(modelCol, "Eigene Modell-ID …", () => pickModel(provider.id, ""));
+    if (custom) addMentionItem(modelCol, "Eigene Modell-ID …", () => pickCustomModel(provider.id));
   }
   if (!keyed.length) modelCol.append(el("p", "hint", "Kein API-Key hinterlegt. Bitte in den Einstellungen eintragen."));
   else if (!firstMentionPick) modelCol.append(el("p", "hint", "Keine passenden Modelle."));
@@ -143,32 +120,43 @@ function renderMentionMenu(query) {
   const agents = usableAgents(data).filter((agent) => agent.name.toLowerCase().includes(query));
   for (const agent of agents) addMentionItem(agentCol, agent.name, () => pickAgent(agent.id));
   if (!agents.length) agentCol.append(el("p", "hint", "Keine passenden Agenten."));
+  agentCol.append(makeMentionItem("＋ Neuer Agent …", () => {
+    finishMention();
+    openNewAgent();
+  }));
 
   mentionMenu.replaceChildren(modelCol, agentCol);
   mentionMenu.hidden = false;
 }
 
-function addMentionItem(parent, label, pick) {
+function makeMentionItem(label, pick) {
   const item = el("button", "mention-item", label, { type: "button" });
   // mousedown statt click, damit das Textfeld den Fokus behält.
   item.addEventListener("mousedown", (event) => {
     event.preventDefault();
     pick();
   });
-  parent.append(item);
+  return item;
+}
+
+function addMentionItem(parent, label, pick) {
+  parent.append(makeMentionItem(label, pick));
   firstMentionPick ??= pick;
 }
 
 function pickModel(providerId, model) {
-  agentSelect.value = "";
-  providerSelect.value = providerId;
-  fillModelSelect(modelSelect, modelCustom, providerId, model);
-  modelSelect.dispatchEvent(new Event("change"));
+  target = { providerId, model };
   finishMention();
 }
 
+function pickCustomModel(providerId) {
+  const model = window.prompt("Modell-ID des Anbieters:")?.trim();
+  if (model) pickModel(providerId, model);
+  else finishMention();
+}
+
 function pickAgent(agentId) {
-  agentSelect.value = agentId;
+  target = { agentId };
   finishMention();
 }
 
@@ -189,16 +177,16 @@ function resetChat() {
   renderSources([]);
 }
 
-// Liefert Provider, Modell und Einstellungen; bei Agent aus dem Agenten, sonst aus der Direkt-Auswahl.
+// Liefert Provider, Modell und Einstellungen; bei Agent aus dem Agenten, sonst aus dem Modell-Ziel.
 function chatConfig() {
   const data = vaultData();
-  const agent = data.agents.find((item) => item.id === agentSelect.value) ?? null;
-  const providerId = agent ? agent.providerId : providerSelect.value;
+  const agent = target?.agentId ? data.agents.find((item) => item.id === target.agentId) ?? null : null;
+  const providerId = agent ? agent.providerId : target?.providerId;
   const provider = data.providers.find((item) => item.id === providerId) ?? null;
   return {
     agent,
     provider,
-    model: agent ? agent.model : readModel(modelSelect, modelCustom),
+    model: agent ? agent.model : target?.model,
     baseUrl: agent?.baseUrl || provider?.baseUrl,
     apiKey: provider?.apiKey || agent?.apiKey,
     systemPrompt: agent ? agent.systemPrompt : DIRECT_SYSTEM_PROMPT,
@@ -214,8 +202,8 @@ async function onSubmit(event) {
   if (!isUnlocked() && !(await requireVault())) return;
 
   const config = chatConfig();
-  if (!config.provider && !config.agent) {
-    appendMessage("error", "Bitte zuerst einen Anbieter in den Einstellungen anlegen.");
+  if (!target || (!config.provider && !config.agent)) {
+    appendMessage("error", "Bitte mit @ ein Modell oder einen Agenten wählen.");
     return;
   }
   if (!config.apiKey) {

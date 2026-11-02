@@ -98,6 +98,11 @@ export function confirmDialog(message, okLabel = "Löschen") {
   });
 }
 
+export async function openNewAgent() {
+  if (!(await requireVault())) return;
+  openAgentModal();
+}
+
 async function openSettings() {
   if (!(await requireVault())) return;
   settingsModal.hidden = false;
