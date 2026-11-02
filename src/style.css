@@ -511,36 +511,6 @@ button:disabled {
   margin-bottom: 12px;
 }
 
-.key-panel {
-  margin-bottom: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #dadce0;
-}
-
-.key-panel h3 {
-  margin: 0 0 4px;
-}
-
-.key-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.key-row strong {
-  min-width: 96px;
-}
-
-.key-row input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 8px;
-  font: inherit;
-  border: 1px solid #dfe1e5;
-  border-radius: 4px;
-}
-
 .item-list {
   list-style: none;
   padding: 0;
