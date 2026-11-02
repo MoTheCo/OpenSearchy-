@@ -31,8 +31,45 @@ let busy = false;
 let currentSources = [];
 let firstMentionPick = null;
 let mentionRun = 0;
-// Gewähltes Ziel: { agentId } oder { providerId, model }; wird nur über das @-Menü gesetzt.
-let target = null;
+// Gewähltes Ziel: { agentId } oder { providerId, model }; wird nur über das @-Menü gesetzt und pro Tab gespeichert.
+const TARGET_KEY = "opensearchy.chatTarget";
+const targetEl = document.getElementById("chat-target");
+let target = loadTarget();
+
+function loadTarget() {
+  try {
+    return JSON.parse(sessionStorage.getItem(TARGET_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function setTarget(next) {
+  target = next;
+  if (next) sessionStorage.setItem(TARGET_KEY, JSON.stringify(next));
+  else sessionStorage.removeItem(TARGET_KEY);
+  renderTarget();
+  updateSubmit();
+}
+
+function targetLabel() {
+  if (!target || !isUnlocked()) return "";
+  const data = vaultData();
+  if (target.agentId) {
+    const agent = data.agents.find((item) => item.id === target.agentId);
+    return agent ? `Agent: ${agent.name}` : "";
+  }
+  const provider = data.providers.find((item) => item.id === target.providerId);
+  return provider ? `Modell: ${target.model} · ${provider.name}` : "";
+}
+
+function renderTarget() {
+  const label = targetLabel();
+  targetEl.hidden = !label;
+  const clear = el("button", "target-clear", "×", { type: "button", title: "Auswahl entfernen", "aria-label": "Auswahl entfernen" });
+  clear.addEventListener("click", () => setTarget(null));
+  targetEl.replaceChildren(el("span", null, label), clear);
+}
 
 const mentionMenu = el("div", "mention-menu");
 mentionMenu.hidden = true;
@@ -68,16 +105,22 @@ export function initChat() {
   form.addEventListener("submit", onSubmit);
   window.addEventListener("vault-changed", dropStaleTarget);
   renderSources([]);
+  renderTarget();
 }
 
 // Entfernt das Ziel, wenn Agent oder Provider inzwischen gelöscht wurden.
 function dropStaleTarget() {
-  if (!target) return;
-  const data = isUnlocked() ? vaultData() : { providers: [], agents: [] };
-  const exists = target.agentId
-    ? data.agents.some((agent) => agent.id === target.agentId)
-    : data.providers.some((provider) => provider.id === target.providerId);
-  if (!exists) target = null;
+  if (target && isUnlocked()) {
+    const data = vaultData();
+    const exists = target.agentId
+      ? data.agents.some((agent) => agent.id === target.agentId)
+      : data.providers.some((provider) => provider.id === target.providerId);
+    if (!exists) {
+      setTarget(null);
+      return;
+    }
+  }
+  renderTarget();
   updateSubmit();
 }
 
@@ -151,7 +194,7 @@ function addMentionItem(parent, label, pick) {
 }
 
 function pickModel(providerId, model) {
-  target = { providerId, model };
+  setTarget({ providerId, model });
   finishMention();
 }
 
@@ -162,7 +205,7 @@ function pickCustomModel(providerId) {
 }
 
 function pickAgent(agentId) {
-  target = { agentId };
+  setTarget({ agentId });
   finishMention();
 }
 
