@@ -1,15 +1,10 @@
 import { el } from "/js/dom.js";
 import {
-  changePassword,
-  createVault,
   exportVault,
   forgetVault,
-  hasStoredVault,
   importVault,
   isUnlocked,
-  lockVault,
   saveVault,
-  unlockVault,
   vaultData,
 } from "/js/vault.js";
 
@@ -35,13 +30,10 @@ const LIBRARIES = {
 
 const $ = (id) => document.getElementById(id);
 const settingsModal = $("settings-modal");
-const masterModal = $("master-key-modal");
-const masterForm = $("master-key-form");
 const agentModal = $("agent-modal");
 const agentForm = $("agent-form");
 const confirmModal = $("confirm-modal");
 
-let masterResolve = null;
 let confirmResolve = null;
 let editing = null;
 
@@ -51,8 +43,6 @@ export function initSettings() {
   for (const button of settingsModal.querySelectorAll(".tab-btn")) {
     button.addEventListener("click", () => showTab(button.dataset.tab));
   }
-  masterForm.addEventListener("submit", onMasterSubmit);
-  $("master-cancel").addEventListener("click", () => closeMaster(false));
   $("confirm-ok").addEventListener("click", () => closeConfirm(true));
   $("confirm-cancel").addEventListener("click", () => closeConfirm(false));
   $("agent-cancel").addEventListener("click", closeAgent);
@@ -64,25 +54,6 @@ export function initSettings() {
   document.addEventListener("keydown", onEscape);
 }
 
-// Liefert true, sobald der Speicher entsperrt bzw. neu angelegt ist.
-export function requireVault() {
-  if (isUnlocked()) return Promise.resolve(true);
-  const creating = !hasStoredVault();
-  $("master-title").textContent = creating ? "Master-Passwort festlegen" : "Master-Passwort";
-  $("master-text").textContent = creating
-    ? "Mit diesem Passwort werden API-Keys, Provider und Prompts verschlüsselt. Es wird nirgends gespeichert; ohne Passwort sind die Daten nicht wiederherstellbar."
-    : "Master-Passwort eingeben, um den verschlüsselten Speicher zu entsperren.";
-  $("master-confirm-field").hidden = !creating;
-  $("master-password-confirm").required = creating;
-  $("master-password").autocomplete = creating ? "new-password" : "current-password";
-  $("master-submit").textContent = creating ? "Speichern" : "Entsperren";
-  masterModal.hidden = false;
-  $("master-password").focus();
-  return new Promise((resolve) => {
-    masterResolve = resolve;
-  });
-}
-
 export function confirmDialog(message, okLabel = "Löschen") {
   $("confirm-message").textContent = message;
   $("confirm-ok").textContent = okLabel;
@@ -92,8 +63,7 @@ export function confirmDialog(message, okLabel = "Löschen") {
   });
 }
 
-async function openSettings() {
-  if (!(await requireVault())) return;
+function openSettings() {
   settingsModal.hidden = false;
   renderAll();
 }
@@ -320,20 +290,48 @@ function closeAgent() {
 
 function renderSecurity() {
   $("tab-security").replaceChildren(
-    el("p", "hint", "Der Speicher liegt verschlüsselt (AES-256-GCM, Schlüssel per PBKDF2 aus dem Master-Passwort) im Browser. Der Server speichert nichts."),
-    section("Sichern", toolbar("Verschlüsselte Datei herunterladen", downloadVault)),
+    el("p", "hint", "Der Speicher liegt im Browser verschlüsselt (AES-256-GCM) mit einem Geräteschlüssel, der nicht exportierbar ist. Das Master-Passwort wird nur für Export und Import der Datei benötigt. Der Server speichert nichts."),
+    section("Sichern", exportForm()),
     section("Wiederherstellen", importForm()),
-    section("Master-Passwort ändern", passwordForm()),
     section("Aktionen", actionRow())
   );
 }
 
-function downloadVault() {
-  const url = URL.createObjectURL(new Blob([exportVault()], { type: "application/json" }));
-  const link = el("a", null, undefined, {
-    href: url,
-    download: `opensearchy-vault-${new Date().toISOString().slice(0, 10)}.json`,
+function exportForm() {
+  const first = el("input", null, undefined, {
+    type: "password",
+    placeholder: "Master-Passwort für die Datei",
+    autocomplete: "new-password",
   });
+  const second = el("input", null, undefined, {
+    type: "password",
+    placeholder: "Wiederholen",
+    autocomplete: "new-password",
+  });
+  const error = el("p", "form-error", undefined, { hidden: "" });
+  const run = button("Verschlüsselte Datei herunterladen", "btn-primary", async () => {
+    error.hidden = true;
+    if (first.value.length < MIN_PASSWORD_LENGTH) {
+      return showError(error, `Mindestens ${MIN_PASSWORD_LENGTH} Zeichen.`);
+    }
+    if (first.value !== second.value) return showError(error, "Passwörter stimmen nicht überein.");
+    try {
+      const text = await exportVault(first.value);
+      downloadText(text, `opensearchy-vault-${new Date().toISOString().slice(0, 10)}.json`);
+      first.value = "";
+      second.value = "";
+    } catch (err) {
+      showError(error, err.message);
+    }
+  });
+  const stack = el("div", "stack");
+  stack.append(first, second, run, error);
+  return stack;
+}
+
+function downloadText(text, filename) {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  const link = el("a", null, undefined, { href: url, download: filename });
   document.body.append(link);
   link.click();
   link.remove();
@@ -366,94 +364,19 @@ function importForm() {
   return stack;
 }
 
-function passwordForm() {
-  const first = el("input", null, undefined, {
-    type: "password",
-    placeholder: "Neues Master-Passwort",
-    autocomplete: "new-password",
-  });
-  const second = el("input", null, undefined, {
-    type: "password",
-    placeholder: "Wiederholen",
-    autocomplete: "new-password",
-  });
-  const error = el("p", "form-error", undefined, { hidden: "" });
-  const run = button("Master-Passwort ändern", "btn-primary", async () => {
-    error.hidden = true;
-    if (first.value.length < MIN_PASSWORD_LENGTH) {
-      return showError(error, `Mindestens ${MIN_PASSWORD_LENGTH} Zeichen.`);
-    }
-    if (first.value !== second.value) return showError(error, "Passwörter stimmen nicht überein.");
-    try {
-      await changePassword(first.value);
-      first.value = "";
-      second.value = "";
-      window.alert("Master-Passwort geändert.");
-    } catch (err) {
-      showError(error, err.message);
-    }
-  });
-  const stack = el("div", "stack");
-  stack.append(first, second, run, error);
-  return stack;
-}
-
 function actionRow() {
   const row = el("div", "toolbar");
   row.append(
-    button("Jetzt sperren", "btn-secondary", () => {
-      lockVault();
-      closeSettings();
-      window.dispatchEvent(new Event("vault-changed"));
-    }),
     button("Gespeicherte Daten im Browser löschen", "btn-danger", async () => {
       if (!(await confirmDialog("Alle Agenten, Provider und Prompts aus dem Browser entfernen? Eine heruntergeladene Datei bleibt erhalten."))) {
         return;
       }
-      forgetVault();
-      closeSettings();
+      await forgetVault();
+      renderAll();
       window.dispatchEvent(new Event("vault-changed"));
     })
   );
   return row;
-}
-
-async function onMasterSubmit(event) {
-  event.preventDefault();
-  const password = $("master-password").value;
-  const confirmation = $("master-password-confirm").value;
-  const creating = !hasStoredVault();
-  const error = $("master-error");
-  error.hidden = true;
-  if (creating && password.length < MIN_PASSWORD_LENGTH) {
-    return showError(error, `Mindestens ${MIN_PASSWORD_LENGTH} Zeichen.`);
-  }
-  if (creating && password !== confirmation) {
-    return showError(error, "Passwörter stimmen nicht überein.");
-  }
-
-  const submit = $("master-submit");
-  submit.disabled = true;
-  try {
-    if (creating) await createVault(password);
-    else await unlockVault(password);
-    window.dispatchEvent(new Event("vault-changed"));
-    closeMaster(true);
-  } catch (err) {
-    showError(error, err.message);
-  } finally {
-    submit.disabled = false;
-  }
-}
-
-function closeMaster(ok) {
-  masterModal.hidden = true;
-  $("master-password").value = "";
-  $("master-password-confirm").value = "";
-  $("master-error").hidden = true;
-  const resolve = masterResolve;
-  masterResolve = null;
-  resolve?.(ok);
 }
 
 function closeConfirm(ok) {
@@ -467,6 +390,5 @@ function onEscape(event) {
   if (event.key !== "Escape") return;
   if (!confirmModal.hidden) closeConfirm(false);
   else if (!agentModal.hidden) closeAgent();
-  else if (!masterModal.hidden) closeMaster(false);
   else if (!settingsModal.hidden) closeSettings();
 }

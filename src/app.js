@@ -1,6 +1,7 @@
 import { initChat } from "/js/chat.js";
 import { initSettings } from "/js/settings.js";
 import { initViews, showView } from "/js/views.js";
+import { loadVault } from "/js/vault.js";
 
 const DB_NAME = "opensearchy";
 const DB_VERSION = 2;
@@ -448,6 +449,7 @@ moreLink.addEventListener("click", (event) => {
 window.addEventListener("popstate", runFromUrl);
 
 cacheCleanup();
+loadVault().catch((err) => window.alert(err.message)).finally(() => window.dispatchEvent(new Event("vault-changed")));
 initSettings();
 initChat();
 initViews();

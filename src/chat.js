@@ -1,7 +1,6 @@
 import { el } from "/js/dom.js";
 import { streamChat } from "/js/llm.js";
 import { retrieveSources } from "/js/rag.js";
-import { requireVault } from "/js/settings.js";
 import { isUnlocked, saveVault, vaultData } from "/js/vault.js";
 
 const GROUNDING_WITH_SOURCES =
@@ -91,7 +90,6 @@ async function onSubmit(event) {
   event.preventDefault();
   const question = input.value.trim();
   if (!question || busy) return;
-  if (!isUnlocked() && !(await requireVault())) return;
 
   const agent = selectedAgent();
   if (!agent) {

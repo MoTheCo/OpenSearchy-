@@ -1,5 +1,3 @@
-import { requireVault } from "/js/settings.js";
-
 const panels = {
   search: document.getElementById("view-search"),
   chat: document.getElementById("chat-panel"),
@@ -14,7 +12,6 @@ export function initViews() {
 }
 
 export async function showView(name) {
-  if (name === "chat" && !(await requireVault())) return;
   for (const [key, panel] of Object.entries(panels)) {
     panel.hidden = key !== name;
   }
