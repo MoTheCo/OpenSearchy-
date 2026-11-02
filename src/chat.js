@@ -131,7 +131,7 @@ async function onSubmit(event) {
   input.value = "";
   updateSubmit();
   appendMessage("user", question);
-  const bubble = appendMessage("assistant", "…");
+  const bubble = appendMessage("assistant", "Quellen werden gesucht …");
 
   try {
     let sources = [];
@@ -145,7 +145,7 @@ async function onSubmit(event) {
     renderSources(sources, question, notice);
 
     let answer = "";
-    bubble.textContent = "";
+    bubble.textContent = "…";
     await streamChat({
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
