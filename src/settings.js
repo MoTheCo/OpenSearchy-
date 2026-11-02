@@ -1,5 +1,5 @@
 import { el } from "/js/dom.js";
-import { bindModelSelect, fillModelSelect, readModel } from "/js/models.js";
+import { bindModelSelect, fillModelSelect, loadModels, readModel } from "/js/models.js";
 import {
   changePassword,
   createVault,
@@ -65,6 +65,7 @@ export function initSettings() {
   $("agent-prompt-template").addEventListener("change", applyPromptTemplate);
   $("agent-provider").addEventListener("change", (event) => {
     fillModelSelect($("agent-model"), $("agent-model-custom"), event.target.value, "");
+    refreshAgentModels("");
   });
   bindModelSelect($("agent-model"), $("agent-model-custom"));
   document.addEventListener("keydown", onEscape);
@@ -286,6 +287,7 @@ function openAgentModal(agent = null) {
   $("agent-name").value = agent?.name ?? "";
   fillSelect($("agent-provider"), data.providers, agent?.providerId ?? data.providers[0].id);
   fillModelSelect($("agent-model"), $("agent-model-custom"), $("agent-provider").value, agent?.model ?? "");
+  refreshAgentModels(agent?.model ?? "");
   $("agent-base-url").value = agent?.baseUrl ?? "";
   fillSelect($("agent-prompt-template"), [{ id: "", name: "Vorlage wählen …" }, ...data.prompts], "");
   $("agent-system-prompt").value = agent?.systemPrompt ?? "";
@@ -294,6 +296,17 @@ function openAgentModal(agent = null) {
   $("agent-max-tokens").value = String(agent?.maxTokens ?? 4000);
   agentModal.hidden = false;
   $("agent-name").focus();
+}
+
+// Lädt die Live-Modellliste des gewählten Providers nach und behält die Auswahl bei.
+async function refreshAgentModels(model) {
+  const providerId = $("agent-provider").value;
+  const provider = vaultData().providers.find((item) => item.id === providerId);
+  if (!provider) return;
+  const models = await loadModels(provider);
+  if ($("agent-provider").value !== providerId) return;
+  const current = model || readModel($("agent-model"), $("agent-model-custom"));
+  fillModelSelect($("agent-model"), $("agent-model-custom"), providerId, current, models);
 }
 
 function applyPromptTemplate(event) {

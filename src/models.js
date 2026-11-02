@@ -55,8 +55,7 @@ export function bindModelSelect(select, customInput) {
   });
 }
 
-export function fillModelSelect(select, customInput, providerId, model = "") {
-  const models = MODEL_CATALOG[providerId] ?? [];
+export function fillModelSelect(select, customInput, providerId, model = "", models = MODEL_CATALOG[providerId] ?? []) {
   select.replaceChildren(
     ...models.map((name) => el("option", null, name, { value: name })),
     el("option", null, "Anderes Modell …", { value: CUSTOM })
@@ -70,4 +69,31 @@ export function fillModelSelect(select, customInput, providerId, model = "") {
 
 export function readModel(select, customInput) {
   return select.value === CUSTOM ? customInput.value.trim() : select.value;
+}
+
+// Keine Chat-Modelle: Embeddings, Audio, Bild, Moderation und Schutzmodelle.
+const NON_CHAT_MODEL = /embed|whisper|tts|dall-e|image|audio|realtime|transcribe|speech|moderation|guard|ocr|rerank/i;
+
+const modelCache = new Map();
+
+// Modelle eines Providers live über GET {baseUrl}/models; bei Fehlern (z. B. CORS) der Katalog.
+export async function loadModels(provider) {
+  const key = `${provider.baseUrl}|${provider.apiKey ?? ""}`;
+  if (!modelCache.has(key)) {
+    const request = fetchModels(provider).catch(() => null);
+    modelCache.set(key, request);
+    if ((await request) === null) modelCache.delete(key);
+  }
+  return (await modelCache.get(key)) ?? MODEL_CATALOG[provider.id] ?? [];
+}
+
+async function fetchModels({ baseUrl, apiKey }) {
+  const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/models`, {
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const { data } = await response.json();
+  const ids = (data ?? []).map((model) => model.id).filter((id) => typeof id === "string" && !NON_CHAT_MODEL.test(id));
+  if (!ids.length) throw new Error("Leere Modellliste");
+  return [...new Set(ids)].sort();
 }

@@ -1,6 +1,6 @@
 import { el } from "/js/dom.js";
 import { streamChat } from "/js/llm.js";
-import { MODEL_CATALOG } from "/js/models.js";
+import { loadModels } from "/js/models.js";
 import { retrieveSources } from "/js/rag.js";
 import { openNewAgent, requireVault } from "/js/settings.js";
 import { isUnlocked, vaultData } from "/js/vault.js";
@@ -28,6 +28,7 @@ let history = [];
 let busy = false;
 let currentSources = [];
 let firstMentionPick = null;
+let mentionRun = 0;
 // Gewähltes Ziel: { agentId } oder { providerId, model }; wird nur über das @-Menü gesetzt.
 let target = null;
 
@@ -96,22 +97,25 @@ function updateMention() {
   renderMentionMenu(match[2].toLowerCase());
 }
 
-function renderMentionMenu(query) {
+async function renderMentionMenu(query) {
+  const run = ++mentionRun;
   const data = isUnlocked() ? vaultData() : { providers: [], agents: [] };
   const keyed = data.providers.filter((provider) => provider.apiKey);
+  const lists = await Promise.all(keyed.map((provider) => loadModels(provider)));
+  if (run !== mentionRun || document.activeElement !== input) return;
   firstMentionPick = null;
 
   const modelCol = el("div", "mention-col");
   modelCol.append(el("h3", null, "Modelle"));
-  for (const provider of keyed) {
-    const models = MODEL_CATALOG[provider.id] ?? [];
+  keyed.forEach((provider, index) => {
+    const models = lists[index];
     const matching = models.filter((model) => `${provider.name} ${model}`.toLowerCase().includes(query));
     const custom = !models.length && provider.name.toLowerCase().includes(query);
-    if (!matching.length && !custom) continue;
+    if (!matching.length && !custom) return;
     modelCol.append(el("div", "mention-group", provider.name));
     for (const model of matching) addMentionItem(modelCol, model, () => pickModel(provider.id, model));
     if (custom) addMentionItem(modelCol, "Eigene Modell-ID …", () => pickCustomModel(provider.id));
-  }
+  });
   if (!keyed.length) modelCol.append(el("p", "hint", "Kein API-Key hinterlegt. Bitte in den Einstellungen eintragen."));
   else if (!firstMentionPick) modelCol.append(el("p", "hint", "Keine passenden Modelle."));
 
