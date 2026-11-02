@@ -1,3 +1,29 @@
+// Vollständige Antwort ohne Streaming; nötig, wenn das LLM ein JSON-Signal liefert.
+export async function completeChat({ baseUrl, apiKey, model, messages, temperature, maxTokens }) {
+  let response;
+  try {
+    response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens, stream: false }),
+    });
+  } catch {
+    throw new Error(
+      "Anfrage an den Provider fehlgeschlagen (Netzwerk, CORS oder ungültiger API-Key). " +
+        "Key, Modell und Base-URL in den Einstellungen prüfen."
+    );
+  }
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    throw new Error(`Provider antwortet mit HTTP ${response.status}: ${detail}`);
+  }
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content ?? "";
+}
+
 export async function streamChat({ baseUrl, apiKey, model, messages, temperature, maxTokens, onToken }) {
   let response;
   try {

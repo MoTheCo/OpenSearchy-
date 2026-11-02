@@ -1,15 +1,17 @@
 import { el } from "/js/dom.js";
-import { streamChat } from "/js/llm.js";
+import { completeChat } from "/js/llm.js";
 import { loadModels } from "/js/models.js";
 import { retrieveSources } from "/js/rag.js";
 import { openNewAgent, requireVault } from "/js/settings.js";
 import { isUnlocked, vaultData } from "/js/vault.js";
 
-const GROUNDING_WITH_SOURCES =
-  "Antworte auf Deutsch. Stütze dich auf die Wikipedia-Auszüge und kennzeichne Aussagen mit der Quellennummer, z. B. [1]. Wenn die Auszüge die Frage nicht beantworten, sag das ausdrücklich.";
-const GROUNDING_WITHOUT_SOURCES =
-  "Antworte auf Deutsch. Es liegen keine Wikipedia-Auszüge vor; weise darauf hin, dass die Antwort nicht belegt ist.";
 const DIRECT_SYSTEM_PROMPT = "Du bist ein hilfreicher Assistent.";
+const DRAFT_INSTRUCTIONS =
+  'Antworte auf Deutsch aus deinem eigenen Wissen. Gib ausschließlich JSON zurück: {"answer": "<deine Antwort>", "confidence": <Zahl von 0 bis 1 für deine Sicherheit>}.';
+const CHECK_INSTRUCTIONS =
+  'Prüfe den Entwurf anhand der Wikipedia-Auszüge und korrigiere ihn bei Bedarf. Kennzeichne belegte Aussagen mit der Quellennummer, z. B. [1]. Gib ausschließlich JSON zurück: {"answer": "<Antwort auf Deutsch>", "uses_sources": <true, wenn die Auszüge die Antwort stützen oder korrigieren, sonst false>, "sources": [<verwendete Quellennummern>]}.';
+// Unter diesem Wert prüft das LLM mit Wikipedia.
+const CONFIDENCE_THRESHOLD = 0.45;
 const DIRECT_TEMPERATURE = 0.7;
 const DIRECT_MAX_TOKENS = 4000;
 const HISTORY_MESSAGES = 20;
@@ -227,34 +229,56 @@ async function onSubmit(event) {
   input.value = "";
   updateSubmit();
   appendMessage("user", question);
-  const bubble = appendMessage("assistant", "Quellen werden gesucht …");
+  const bubble = appendMessage("assistant", "Antwort wird aus eigenem Wissen erstellt …");
 
+  const base = { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, temperature: config.temperature, maxTokens: config.maxTokens };
   try {
-    let sources = [];
-    let context = "";
-    let notice = "";
-    try {
-      ({ sources, context } = await retrieveSources(question));
-    } catch (err) {
-      notice = `Wikipedia nicht erreichbar, Antwort ohne Quellen (${err.message}).`;
-    }
-    renderSources(sources, question, notice);
+    const draft = parseReply(
+      await completeChat({
+        ...base,
+        messages: [
+          { role: "system", content: `${config.systemPrompt}\n\n${DRAFT_INSTRUCTIONS}` },
+          ...history.slice(-HISTORY_MESSAGES),
+          { role: "user", content: question },
+        ],
+      })
+    );
+    let answer = draft.answer || "";
 
-    let answer = "";
-    bubble.textContent = "…";
-    await streamChat({
-      baseUrl: config.baseUrl,
-      apiKey: config.apiKey,
-      model: config.model,
-      temperature: config.temperature,
-      maxTokens: config.maxTokens,
-      messages: buildMessages(config.systemPrompt, question, context),
-      onToken(token) {
-        answer += token;
-        bubble.textContent = answer;
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      },
-    });
+    if (normalizeConfidence(draft.confidence) >= CONFIDENCE_THRESHOLD) {
+      renderSources([], question, "Antwort aus eigenem Wissen, nicht über Wikipedia geprüft.");
+    } else {
+      bubble.textContent = "Wikipedia wird zur Prüfung abgefragt …";
+      let sources = [];
+      let context = "";
+      let notice = "";
+      try {
+        ({ sources, context } = await retrieveSources(question));
+      } catch (err) {
+        notice = `Wikipedia nicht erreichbar (${err.message}).`;
+      }
+      if (context) {
+        bubble.textContent = "Entwurf wird mit Wikipedia geprüft …";
+        const check = parseReply(
+          await completeChat({
+            ...base,
+            messages: [
+              { role: "system", content: `${config.systemPrompt}\n\n${CHECK_INSTRUCTIONS}\n\nWikipedia-Auszüge:\n\n${context}` },
+              { role: "user", content: `Frage: ${question}\n\nEntwurf: ${answer}` },
+            ],
+          })
+        );
+        answer = check.answer || answer;
+        // Quellen nur, wenn das LLM das Signal gibt.
+        const used = Array.isArray(check.sources) ? check.sources.map(String) : [];
+        const shown = check.uses_sources ? sources.filter((source) => used.includes(String(source.n))) : [];
+        const visible = check.uses_sources ? (shown.length ? shown : sources) : [];
+        renderSources(visible, question, notice);
+      } else {
+        renderSources([], question, notice);
+      }
+    }
+
     history.push({ role: "user", content: question }, { role: "assistant", content: answer });
     renderAnswer(bubble, answer || "(leere Antwort)");
   } catch (err) {
@@ -266,14 +290,25 @@ async function onSubmit(event) {
   }
 }
 
-function buildMessages(systemPrompt, question, context) {
-  const system = [systemPrompt || DIRECT_SYSTEM_PROMPT, context ? GROUNDING_WITH_SOURCES : GROUNDING_WITHOUT_SOURCES];
-  if (context) system.push(`Wikipedia-Auszüge:\n\n${context}`);
-  return [
-    { role: "system", content: system.join("\n\n") },
-    ...history.slice(-HISTORY_MESSAGES),
-    { role: "user", content: question },
-  ];
+// Das LLM antwortet mit JSON; ohne lesbares JSON gilt der Text als Antwort ohne Prüfsignal.
+function parseReply(text) {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (match) {
+    try {
+      return JSON.parse(match[0]);
+    } catch {
+      // Fällt auf den Rohtext zurück.
+    }
+  }
+  return { answer: text.trim() };
+}
+
+// Sicherheit als Anteil zwischen 0 und 1; fehlende oder unlesbare Werte gelten als unsicher.
+function normalizeConfidence(value) {
+  let number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  if (number > 1) number /= 100;
+  return Math.min(Math.max(number, 0), 1);
 }
 
 function appendMessage(role, text) {
@@ -314,7 +349,7 @@ function renderSources(sources, question = "", notice = "") {
     for (const source of sources) list.append(sourceItem(source));
     parts.push(list);
   } else {
-    parts.push(el("p", "sources-empty", question ? "Keine Wikipedia-Quellen gefunden." : "Noch keine Quellen."));
+    parts.push(el("p", "sources-empty", question ? "Keine Quellen für diese Antwort." : "Noch keine Quellen."));
   }
   sourcesPanel.replaceChildren(...parts);
   sourcesCount.textContent = sources.length ? `(${sources.length})` : "";
