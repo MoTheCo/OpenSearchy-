@@ -23,7 +23,7 @@ const LIBRARIES = {
       { name: "baseUrl", label: "Base URL", type: "url", required: true },
       { name: "apiKey", label: "API-Key", type: "password" },
     ],
-    subtitle: (item) => item.baseUrl,
+    subtitle: (item) => `${item.baseUrl} · ${item.apiKey ? "API-Key hinterlegt" : "kein API-Key"}`,
   },
   prompts: {
     singular: "Prompt",
@@ -193,9 +193,47 @@ function renderLibrary(tab) {
       renderLibrary(tab);
     }),
   ];
+  if (tab === "providers") parts.push(apiKeyPanel());
   if (editing?.tab === tab) parts.push(editorForm(tab, fields, editing.item));
   parts.push(list);
   $(`tab-${tab}`).replaceChildren(...parts);
+}
+
+// Ein Eingabefeld pro Anbieter; Modelle eines Anbieters erscheinen im @-Menü erst mit Key.
+function apiKeyPanel() {
+  const data = vaultData();
+  const panel = el("div", "key-panel");
+  panel.append(
+    el("h3", null, "API-Keys"),
+    el("p", "hint", "Keys werden verschlüsselt im Browser gespeichert. Die Modelle eines Anbieters erscheinen im @-Menü, sobald ein Key hinterlegt ist.")
+  );
+  for (const provider of data.providers) {
+    const keyInput = el("input", null, undefined, {
+      type: "password",
+      autocomplete: "off",
+      placeholder: provider.apiKey ? "Hinterlegt – zum Ändern neu eingeben" : "API-Key eingeben",
+      "aria-label": `API-Key ${provider.name}`,
+    });
+    const row = el("form", "key-row");
+    row.append(el("strong", null, provider.name), keyInput, el("button", "btn-primary", "Speichern", { type: "submit" }));
+    if (provider.apiKey) {
+      row.append(
+        button("Entfernen", "btn-danger", async () => {
+          provider.apiKey = "";
+          await commit();
+        })
+      );
+    }
+    row.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const key = keyInput.value.trim();
+      if (!key) return;
+      provider.apiKey = key;
+      await commit();
+    });
+    panel.append(row);
+  }
+  return panel;
 }
 
 function editorForm(tab, fields, item) {
