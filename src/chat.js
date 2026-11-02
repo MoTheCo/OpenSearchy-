@@ -181,6 +181,15 @@ async function renderMentionMenu(query) {
 
   const modelCol = el("div", "mention-col");
   modelCol.append(el("h3", null, "Modelle"));
+  const recent = readJson(RECENT_KEY, []).filter((item) => {
+    if (!isUnlocked() || !item.providerId || !targetExists(item)) return false;
+    const providerName = data.providers.find((provider) => provider.id === item.providerId)?.name ?? "";
+    return `${providerName} ${item.model}`.toLowerCase().includes(query);
+  });
+  if (recent.length) {
+    modelCol.append(el("div", "mention-group", "Zuletzt verwendet"));
+    for (const item of recent) addMentionItem(modelCol, item.model, () => pickModel(item.providerId, item.model));
+  }
   keyed.forEach((provider, index) => {
     const models = lists[index];
     const matching = models.filter((model) => `${provider.name} ${model}`.toLowerCase().includes(query));
