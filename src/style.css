@@ -201,24 +201,32 @@ header button {
   font-weight: 500;
 }
 
-.chat-target {
+.chat-chips {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
   gap: 8px;
-  padding: 8px 16px;
-  font-size: 14px;
-  background: #e8f0fe;
-  border-bottom: 1px solid #dadce0;
+  overflow-x: auto;
+  padding: 10px 12px 0;
 }
 
-.target-clear {
-  border: 0;
-  background: none;
-  font-size: 18px;
-  line-height: 1;
-  color: #5f6368;
+.chip {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border: 1px solid #dadce0;
+  border-radius: 16px;
+  background: #fff;
+  font: inherit;
+  font-size: 14px;
+  white-space: nowrap;
   cursor: pointer;
+}
+
+.chip:hover {
+  background: #f1f3f4;
+}
+
+.chip.active {
+  background: #e8eaed;
+  font-weight: 600;
 }
 
 .chat-controls {

@@ -31,44 +31,79 @@ let busy = false;
 let currentSources = [];
 let firstMentionPick = null;
 let mentionRun = 0;
-// Gewähltes Ziel: { agentId } oder { providerId, model }; wird nur über das @-Menü gesetzt und pro Tab gespeichert.
+// Gewähltes Ziel: { agentId } oder { providerId, model }; pro Tab gespeichert.
 const TARGET_KEY = "opensearchy.chatTarget";
-const targetEl = document.getElementById("chat-target");
-let target = loadTarget();
+const RECENT_KEY = "opensearchy.recentTargets";
+const RECENT_LIMIT = 5;
+const chipsEl = document.getElementById("chat-chips");
+let target = readJson(TARGET_KEY, null);
 
-function loadTarget() {
+function readJson(key, fallback) {
   try {
-    return JSON.parse(sessionStorage.getItem(TARGET_KEY));
+    return JSON.parse(sessionStorage.getItem(key)) ?? fallback;
   } catch {
-    return null;
+    return fallback;
   }
+}
+
+function sameTarget(a, b) {
+  return a?.agentId === b?.agentId && a?.providerId === b?.providerId && a?.model === b?.model;
 }
 
 function setTarget(next) {
   target = next;
-  if (next) sessionStorage.setItem(TARGET_KEY, JSON.stringify(next));
-  else sessionStorage.removeItem(TARGET_KEY);
-  renderTarget();
+  if (next) {
+    sessionStorage.setItem(TARGET_KEY, JSON.stringify(next));
+    const recent = readJson(RECENT_KEY, []).filter((item) => !sameTarget(item, next));
+    sessionStorage.setItem(RECENT_KEY, JSON.stringify([next, ...recent].slice(0, RECENT_LIMIT)));
+  } else {
+    sessionStorage.removeItem(TARGET_KEY);
+  }
+  renderChips();
   updateSubmit();
 }
 
-function targetLabel() {
-  if (!target || !isUnlocked()) return "";
-  const data = vaultData();
-  if (target.agentId) {
-    const agent = data.agents.find((item) => item.id === target.agentId);
-    return agent ? `Agent: ${agent.name}` : "";
-  }
-  const provider = data.providers.find((item) => item.id === target.providerId);
-  return provider ? `Modell: ${target.model} · ${provider.name}` : "";
+// Anzeigename, der im Text als @Name erscheint.
+function targetName(item) {
+  if (!item || !isUnlocked()) return "";
+  if (item.agentId) return vaultData().agents.find((agent) => agent.id === item.agentId)?.name ?? "";
+  return item.model ?? "";
 }
 
-function renderTarget() {
-  const label = targetLabel();
-  targetEl.hidden = !label;
-  const clear = el("button", "target-clear", "×", { type: "button", title: "Auswahl entfernen", "aria-label": "Auswahl entfernen" });
-  clear.addEventListener("click", () => setTarget(null));
-  targetEl.replaceChildren(el("span", null, label), clear);
+function targetExists(item) {
+  const data = vaultData();
+  if (item.agentId) return data.agents.some((agent) => agent.id === item.agentId);
+  return data.providers.some((provider) => provider.id === item.providerId);
+}
+
+function renderChips() {
+  const items = [];
+  if (isUnlocked()) {
+    const data = vaultData();
+    for (const agent of usableAgents(data)) items.push({ item: { agentId: agent.id }, label: agent.name });
+    for (const item of readJson(RECENT_KEY, [])) {
+      if (!targetExists(item) || items.some((entry) => sameTarget(entry.item, item))) continue;
+      items.push({ item, label: targetName(item) });
+    }
+    if (target && !items.some((entry) => sameTarget(entry.item, target)) && targetExists(target)) {
+      items.unshift({ item: target, label: targetName(target) });
+    }
+  }
+  chipsEl.hidden = items.length === 0;
+  chipsEl.replaceChildren(
+    ...items.map(({ item, label }) => {
+      const chip = el("button", sameTarget(item, target) ? "chip active" : "chip", label, { type: "button" });
+      chip.addEventListener("click", () => selectTarget(item));
+      return chip;
+    })
+  );
+}
+
+// Wählt ein Ziel und setzt die @-Erwähnung in das Eingabefeld.
+function selectTarget(item) {
+  setTarget(item);
+  insertMention(targetName(item));
+  input.focus();
 }
 
 const mentionMenu = el("div", "mention-menu");
@@ -105,22 +140,16 @@ export function initChat() {
   form.addEventListener("submit", onSubmit);
   window.addEventListener("vault-changed", dropStaleTarget);
   renderSources([]);
-  renderTarget();
+  renderChips();
 }
 
 // Entfernt das Ziel, wenn Agent oder Provider inzwischen gelöscht wurden.
 function dropStaleTarget() {
-  if (target && isUnlocked()) {
-    const data = vaultData();
-    const exists = target.agentId
-      ? data.agents.some((agent) => agent.id === target.agentId)
-      : data.providers.some((provider) => provider.id === target.providerId);
-    if (!exists) {
-      setTarget(null);
-      return;
-    }
+  if (target && isUnlocked() && !targetExists(target)) {
+    setTarget(null);
+    return;
   }
-  renderTarget();
+  renderChips();
   updateSubmit();
 }
 
@@ -195,7 +224,7 @@ function addMentionItem(parent, label, pick) {
 
 function pickModel(providerId, model) {
   setTarget({ providerId, model });
-  finishMention();
+  finishMention(model);
 }
 
 function pickCustomModel(providerId) {
@@ -206,18 +235,32 @@ function pickCustomModel(providerId) {
 
 function pickAgent(agentId) {
   setTarget({ agentId });
-  finishMention();
+  finishMention(targetName({ agentId }));
 }
 
-// Entfernt den @-Suchtext vor dem Cursor und aktualisiert die Oberfläche.
-function finishMention() {
+// Ersetzt den @-Suchtext vor dem Cursor durch die gewählte Erwähnung (leer = entfernen).
+function finishMention(name = "") {
   const cursor = input.selectionStart;
-  const before = input.value.slice(0, cursor).replace(/@[^\s@]*$/, "");
+  const before = input.value.slice(0, cursor).replace(/@[^\s@]*$/, name ? `@${name} ` : "");
   input.value = before + input.value.slice(cursor);
   input.setSelectionRange(before.length, before.length);
   mentionMenu.hidden = true;
   updateSubmit();
   input.focus();
+}
+
+// Setzt die Erwähnung des Ziels an den Anfang des Eingabefelds, ohne eine vorherige zu duplizieren.
+function insertMention(name) {
+  if (!name) return;
+  input.value = `@${name} ${input.value.replace(/^@\S*\s*/, "")}`;
+  updateSubmit();
+}
+
+// Entfernt die Erwähnung des gewählten Ziels aus dem Fragetext.
+function questionText() {
+  const raw = input.value.trim();
+  const name = targetName(target);
+  return name ? raw.split(`@${name}`).join("").trim() : raw;
 }
 
 function resetChat() {
@@ -246,7 +289,7 @@ function chatConfig() {
 
 async function onSubmit(event) {
   event.preventDefault();
-  const question = input.value.trim();
+  const question = questionText();
   if (!question || busy) return;
   if (!isUnlocked() && !(await requireVault())) return;
 
