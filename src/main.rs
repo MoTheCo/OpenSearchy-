@@ -13,6 +13,7 @@ const MODULES: &[(&str, &str)] = &[
     ("dom.js", include_str!("dom.js")),
     ("vault.js", include_str!("vault.js")),
     ("llm.js", include_str!("llm.js")),
+    ("models.js", include_str!("models.js")),
     ("rag.js", include_str!("rag.js")),
     ("chat.js", include_str!("chat.js")),
     ("settings.js", include_str!("settings.js")),

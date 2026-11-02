@@ -1,4 +1,5 @@
 import { el } from "/js/dom.js";
+import { bindModelSelect, fillModelSelect, readModel } from "/js/models.js";
 import {
   changePassword,
   createVault,
@@ -20,6 +21,7 @@ const LIBRARIES = {
     fields: [
       { name: "name", label: "Name", required: true },
       { name: "baseUrl", label: "Base URL", type: "url", required: true },
+      { name: "apiKey", label: "API-Key", type: "password" },
     ],
     subtitle: (item) => item.baseUrl,
   },
@@ -61,6 +63,10 @@ export function initSettings() {
     $("temperature-value").textContent = event.target.value;
   });
   $("agent-prompt-template").addEventListener("change", applyPromptTemplate);
+  $("agent-provider").addEventListener("change", (event) => {
+    fillModelSelect($("agent-model"), $("agent-model-custom"), event.target.value, "");
+  });
+  bindModelSelect($("agent-model"), $("agent-model-custom"));
   document.addEventListener("keydown", onEscape);
 }
 
@@ -274,8 +280,7 @@ function openAgentModal(agent = null) {
   $("agent-id").value = agent?.id ?? "";
   $("agent-name").value = agent?.name ?? "";
   fillSelect($("agent-provider"), data.providers, agent?.providerId ?? data.providers[0].id);
-  $("agent-model").value = agent?.model ?? "";
-  $("agent-api-key").value = agent?.apiKey ?? "";
+  fillModelSelect($("agent-model"), $("agent-model-custom"), $("agent-provider").value, agent?.model ?? "");
   $("agent-base-url").value = agent?.baseUrl ?? "";
   fillSelect($("agent-prompt-template"), [{ id: "", name: "Vorlage wählen …" }, ...data.prompts], "");
   $("agent-system-prompt").value = agent?.systemPrompt ?? "";
@@ -300,8 +305,7 @@ async function onAgentSubmit(event) {
     id,
     name: $("agent-name").value.trim(),
     providerId: $("agent-provider").value,
-    model: $("agent-model").value.trim(),
-    apiKey: $("agent-api-key").value.trim(),
+    model: readModel($("agent-model"), $("agent-model-custom")),
     baseUrl: $("agent-base-url").value.trim(),
     systemPrompt: $("agent-system-prompt").value.trim(),
     temperature: Number($("agent-temperature").value),

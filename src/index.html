@@ -37,13 +37,11 @@
             <button id="new-chat-btn" class="icon-btn" title="Neuer Chat" aria-label="Neuer Chat">＋</button>
           </div>
         </div>
-        <form class="chat-key-form" id="chat-key-form" hidden>
-          <p class="hint">Für diesen Agenten ist noch kein API-Key hinterlegt.</p>
-          <div class="chat-key-row">
-            <input type="password" id="chat-key-input" placeholder="API-Key eingeben" autocomplete="off" aria-label="API-Key">
-            <button type="submit" class="btn-primary">Speichern</button>
-          </div>
-        </form>
+        <div class="chat-direct" id="chat-direct" hidden>
+          <select id="chat-provider" aria-label="Provider"></select>
+          <select id="chat-model" aria-label="Modell"></select>
+          <input type="text" id="chat-model-custom" placeholder="Modell-ID des Anbieters" aria-label="Eigene Modell-ID" hidden>
+        </div>
         <div class="chat-messages" id="chat-messages"></div>
         <form class="chat-input-form" id="chat-form">
           <textarea id="chat-input" placeholder="Frage stellen…" rows="1" aria-label="Nachricht"></textarea>
@@ -86,11 +84,8 @@
         </div>
         <div class="form-group">
           <label for="agent-model">Modell</label>
-          <input type="text" id="agent-model" required placeholder="z.B. gpt-4o, claude-3-5-sonnet">
-        </div>
-        <div class="form-group">
-          <label for="agent-api-key">API Key</label>
-          <input type="password" id="agent-api-key" placeholder="Wird verschlüsselt gespeichert">
+          <select id="agent-model" required></select>
+          <input type="text" id="agent-model-custom" placeholder="Modell-ID des Anbieters" hidden>
         </div>
         <div class="form-group">
           <label for="agent-base-url">Base URL (optional)</label>
