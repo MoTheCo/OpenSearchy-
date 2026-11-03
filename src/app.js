@@ -1,7 +1,7 @@
 import { initChat } from "/js/chat.js";
 import { restoreVault } from "/js/vault.js";
 import { initSettings } from "/js/settings.js";
-import { initViews, showView } from "/js/views.js";
+import { initViews, savedView, showView } from "/js/views.js";
 
 const DB_NAME = "opensearchy";
 const DB_VERSION = 2;
@@ -454,5 +454,9 @@ initChat();
 initViews();
 runFromUrl();
 restoreVault().then((restored) => {
-  if (restored) window.dispatchEvent(new Event("vault-changed"));
+  if (!restored) return;
+  window.dispatchEvent(new Event("vault-changed"));
+  // Nach dem Neuladen zur Chat-Ansicht zurückkehren, außer bei einer Suche in der URL.
+  const hasQuery = new URLSearchParams(location.search).has("q");
+  if (savedView() === "chat" && !hasQuery) showView("chat");
 });
