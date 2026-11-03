@@ -8,6 +8,12 @@ import { isUnlocked, vaultData } from "/js/vault.js";
 const DIRECT_SYSTEM_PROMPT = "Du bist ein hilfreicher Assistent.";
 const DRAFT_INSTRUCTIONS =
   'Antworte auf Deutsch aus deinem eigenen Wissen. Gib ausschließlich JSON zurück: {"answer": "<deine Antwort>", "confidence": <Zahl von 0 bis 1 für deine Sicherheit>}.';
+// Ergänzung des Systemprompts, nur wenn der Nutzer nach Quellen fragt.
+const KEYWORD_INSTRUCTIONS =
+  'Der Nutzer möchte Quellen. Ergänze das JSON um "keywords": ein Array mit 2 bis 5 Suchbegriffen für die Wikipedia-Suche, abgeleitet aus dem gesamten Gespräch (Eigennamen und Fachbegriffe, ohne Fragewörter).';
+// Wörter, die im Nutzertext die Quellensuche auslösen.
+const SOURCE_TRIGGER = /quell|beleg|nachweis|\bsources?\b|\breferences?\b/i;
+const MAX_KEYWORDS = 5;
 const CHECK_INSTRUCTIONS =
   'Prüfe den Entwurf anhand der Wikipedia-Auszüge und korrigiere ihn bei Bedarf. Kennzeichne belegte Aussagen mit der Quellennummer, z. B. [1]. Gib ausschließlich JSON zurück: {"answer": "<Antwort auf Deutsch>", "uses_sources": <true, wenn die Auszüge die Antwort stützen oder korrigieren, sonst false>, "sources": [<verwendete Quellennummern>]}.';
 // Unter diesem Wert prüft das LLM mit Wikipedia.
@@ -337,12 +343,13 @@ async function onSubmit(event) {
   const bubble = appendMessage("assistant", "Antwort wird aus eigenem Wissen erstellt …");
 
   const base = { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, temperature: config.temperature, maxTokens: config.maxTokens };
+  const wantsSources = SOURCE_TRIGGER.test(question);
   try {
     const draft = parseReply(
       await completeChat({
         ...base,
         messages: [
-          { role: "system", content: `${config.systemPrompt}\n\n${DRAFT_INSTRUCTIONS}` },
+          { role: "system", content: `${config.systemPrompt}\n\n${DRAFT_INSTRUCTIONS}${wantsSources ? `\n\n${KEYWORD_INSTRUCTIONS}` : ""}` },
           ...history.slice(-HISTORY_MESSAGES),
           { role: "user", content: question },
         ],
@@ -350,15 +357,17 @@ async function onSubmit(event) {
     );
     let answer = draft.answer || "";
 
-    if (normalizeConfidence(draft.confidence) >= CONFIDENCE_THRESHOLD) {
+    if (!wantsSources && normalizeConfidence(draft.confidence) >= CONFIDENCE_THRESHOLD) {
       renderSources([], question, "Antwort aus eigenem Wissen, nicht über Wikipedia geprüft.");
     } else {
-      bubble.textContent = "Wikipedia wird zur Prüfung abgefragt …";
+      // Mit Keywords des LLMs suchen; ohne Keywords dient die Frage als Suchtext.
+      const query = (wantsSources && keywordQuery(draft.keywords)) || question;
+      bubble.textContent = "Wikipedia wird durchsucht …";
       let sources = [];
       let context = "";
       let notice = "";
       try {
-        ({ sources, context } = await retrieveSources(question));
+        ({ sources, context } = await retrieveSources(query));
       } catch (err) {
         notice = `Wikipedia nicht erreichbar (${err.message}).`;
       }
@@ -374,13 +383,13 @@ async function onSubmit(event) {
           })
         );
         answer = check.answer || answer;
-        // Quellen nur, wenn das LLM das Signal gibt.
+        // Quellen erscheinen bei Signal des LLMs oder wenn der Nutzer sie ausdrücklich verlangt.
         const used = Array.isArray(check.sources) ? check.sources.map(String) : [];
-        const shown = check.uses_sources ? sources.filter((source) => used.includes(String(source.n))) : [];
-        const visible = check.uses_sources ? (shown.length ? shown : sources) : [];
-        renderSources(visible, question, notice);
+        const shown = sources.filter((source) => used.includes(String(source.n)));
+        const signal = wantsSources || check.uses_sources === true;
+        renderSources(signal ? (shown.length ? shown : sources) : [], question, notice);
       } else {
-        renderSources([], question, notice);
+        renderSources([], question, wantsSources && !notice ? "Keine passenden Wikipedia-Quellen gefunden." : notice);
       }
     }
 
@@ -406,6 +415,16 @@ function parseReply(text) {
     }
   }
   return { answer: text.trim() };
+}
+
+// Keywords des LLMs als Suchtext; leere oder ungültige Werte ergeben "".
+function keywordQuery(keywords) {
+  if (!Array.isArray(keywords)) return "";
+  return keywords
+    .map((keyword) => String(keyword).trim())
+    .filter(Boolean)
+    .slice(0, MAX_KEYWORDS)
+    .join(" ");
 }
 
 // Sicherheit als Anteil zwischen 0 und 1; fehlende oder unlesbare Werte gelten als unsicher.
