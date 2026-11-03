@@ -32,9 +32,14 @@ const newChatBtn = document.getElementById("new-chat-btn");
 
 const MENTION = /(^|\s)@([^\s@]*)$/;
 
-let history = [];
+const CHAT_KEY = "opensearchy.chat";
+// Verlauf für das LLM, Anzeige-Einträge und letzter Quellenstand; bleiben über Neuladen erhalten.
+const saved = readJson(CHAT_KEY, {});
+let history = saved.history ?? [];
+let transcript = saved.transcript ?? [];
+let sourcesState = saved.sources ?? null;
 let busy = false;
-let currentSources = [];
+let currentSources = sourcesState?.sources ?? [];
 let firstMentionPick = null;
 let mentionRun = 0;
 // Gewähltes Ziel: { agentId } oder { providerId, model }. Bleibt über Tabs und Neustarts im Browser erhalten.
@@ -145,7 +150,7 @@ export function initChat() {
   });
   form.addEventListener("submit", onSubmit);
   window.addEventListener("vault-changed", dropStaleTarget);
-  renderSources([]);
+  restoreChat();
   renderChips();
 }
 
@@ -290,8 +295,23 @@ function questionText() {
 
 function resetChat() {
   history = [];
+  transcript = [];
   messagesEl.replaceChildren();
   renderSources([]);
+  saveChat();
+}
+
+function saveChat() {
+  localStorage.setItem(CHAT_KEY, JSON.stringify({ history, transcript, sources: sourcesState }));
+}
+
+// Zeigt den gespeicherten Verlauf und die Quellen des letzten Stands.
+function restoreChat() {
+  renderSources(sourcesState?.sources ?? [], sourcesState?.question ?? "", sourcesState?.notice ?? "");
+  for (const entry of transcript) {
+    const bubble = appendMessage(entry.role, entry.text);
+    if (entry.role === "assistant") renderAnswer(bubble, entry.text, entry.sources);
+  }
 }
 
 // Liefert Provider, Modell und Einstellungen; bei Agent aus dem Agenten, sonst aus dem Modell-Ziel.
@@ -340,6 +360,8 @@ async function onSubmit(event) {
   input.value = "";
   updateSubmit();
   appendMessage("user", question);
+  transcript.push({ role: "user", text: question });
+  saveChat();
   const bubble = appendMessage("assistant", "Antwort wird aus eigenem Wissen erstellt …");
 
   const base = { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, temperature: config.temperature, maxTokens: config.maxTokens };
@@ -394,10 +416,16 @@ async function onSubmit(event) {
     }
 
     history.push({ role: "user", content: question }, { role: "assistant", content: answer });
-    renderAnswer(bubble, answer || "(leere Antwort)");
+    const finalText = answer || "(leere Antwort)";
+    transcript.push({ role: "assistant", text: finalText, sources: citationsOf(currentSources) });
+    renderAnswer(bubble, finalText);
+    saveChat();
   } catch (err) {
+    const text = `Fehler: ${err.message}`;
     bubble.className = "message error";
-    bubble.textContent = `Fehler: ${err.message}`;
+    bubble.textContent = text;
+    transcript.push({ role: "error", text });
+    saveChat();
   } finally {
     busy = false;
     updateSubmit();
@@ -442,7 +470,7 @@ function appendMessage(role, text) {
   return bubble;
 }
 
-function renderAnswer(bubble, text) {
+function renderAnswer(bubble, text, sources = currentSources) {
   bubble.replaceChildren();
   for (const part of text.split(/(\[\d+\])/)) {
     const number = part.match(/^\[(\d+)\]$/)?.[1];
@@ -450,7 +478,7 @@ function renderAnswer(bubble, text) {
       bubble.append(part);
       continue;
     }
-    const source = currentSources.find((item) => String(item.n) === number);
+    const source = sources.find((item) => String(item.n) === number);
     if (!source) {
       bubble.append(part);
       continue;
@@ -459,12 +487,19 @@ function renderAnswer(bubble, text) {
   }
 }
 
+// Nur die Felder, die für die Zitat-Links nötig sind.
+function citationsOf(sources) {
+  return sources.map(({ n, title, url }) => ({ n, title, url }));
+}
+
 function sourceUrl(source) {
   return source.url || `https://de.wikipedia.org/wiki/${encodeURIComponent(source.title.replace(/ /g, "_"))}`;
 }
 
 function renderSources(sources, question = "", notice = "") {
   currentSources = sources;
+  sourcesState = { sources, question, notice };
+  saveChat();
   const parts = [el("h2", null, "Quellen")];
   if (question) parts.push(el("p", "sources-query", `Frage: ${question}`));
   if (notice) parts.push(el("p", "hint", notice));
