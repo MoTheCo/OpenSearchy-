@@ -37,7 +37,7 @@ let busy = false;
 let currentSources = [];
 let firstMentionPick = null;
 let mentionRun = 0;
-// Gewähltes Ziel: { agentId } oder { providerId, model }; pro Tab gespeichert.
+// Gewähltes Ziel: { agentId } oder { providerId, model }. Bleibt über Tabs und Neustarts im Browser erhalten.
 const TARGET_KEY = "opensearchy.chatTarget";
 const RECENT_KEY = "opensearchy.recentTargets";
 const RECENT_LIMIT = 5;
@@ -46,7 +46,7 @@ let target = readJson(TARGET_KEY, null);
 
 function readJson(key, fallback) {
   try {
-    return JSON.parse(sessionStorage.getItem(key)) ?? fallback;
+    return JSON.parse(localStorage.getItem(key)) ?? fallback;
   } catch {
     return fallback;
   }
@@ -59,11 +59,11 @@ function sameTarget(a, b) {
 function setTarget(next) {
   target = next;
   if (next) {
-    sessionStorage.setItem(TARGET_KEY, JSON.stringify(next));
+    localStorage.setItem(TARGET_KEY, JSON.stringify(next));
     const recent = readJson(RECENT_KEY, []).filter((item) => !sameTarget(item, next));
-    sessionStorage.setItem(RECENT_KEY, JSON.stringify([next, ...recent].slice(0, RECENT_LIMIT)));
+    localStorage.setItem(RECENT_KEY, JSON.stringify([next, ...recent].slice(0, RECENT_LIMIT)));
   } else {
-    sessionStorage.removeItem(TARGET_KEY);
+    localStorage.removeItem(TARGET_KEY);
   }
   renderChips();
   updateSubmit();
