@@ -154,6 +154,13 @@ export function initChat() {
   renderChips();
 }
 
+// Übergibt eine Frage von außen (z. B. aus der Suche) an den Chat und sendet sie.
+export function sendQuestion(text) {
+  input.value = text;
+  updateSubmit();
+  form.requestSubmit();
+}
+
 // Entfernt das Ziel, wenn Agent oder Provider inzwischen gelöscht wurden.
 function dropStaleTarget() {
   if (target && isUnlocked() && !targetExists(target)) {

@@ -1,6 +1,6 @@
-import { initChat } from "/js/chat.js";
+import { initChat, sendQuestion } from "/js/chat.js";
 import { restoreVault } from "/js/vault.js";
-import { initSettings } from "/js/settings.js";
+import { initSettings, requireVault } from "/js/settings.js";
 import { initViews, savedView, showView } from "/js/views.js";
 
 const DB_NAME = "opensearchy";
@@ -432,10 +432,28 @@ function runFromUrl() {
   }
 }
 
-form.addEventListener("submit", (event) => {
+// Ab dieser Wortzahl (oder mit Fragezeichen) gilt die Eingabe als Satz und geht in den Chat.
+const SENTENCE_MIN_WORDS = 4;
+
+function isSentence(query) {
+  return query.endsWith("?") || query.split(/\s+/).length >= SENTENCE_MIN_WORDS;
+}
+
+async function openChatWith(question) {
+  if (!(await requireVault())) return;
+  await showView("chat");
+  sendQuestion(question);
+}
+
+form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const query = input.value.trim();
   if (!query) return;
+  if (isSentence(query)) {
+    input.value = "";
+    await openChatWith(query);
+    return;
+  }
   history.pushState(null, "", `/?q=${encodeURIComponent(query)}`);
   showView("search");
   runSearch(query, 0);
