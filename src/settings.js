@@ -343,7 +343,7 @@ function closeAgent() {
 
 function renderSecurity() {
   $("tab-security").replaceChildren(
-    el("p", "hint", "Der Speicher liegt verschlüsselt (AES-256-GCM, Schlüssel per PBKDF2 aus dem Master-Passwort) im Browser. Der Server speichert nichts."),
+    el("p", "hint", "Der Speicher liegt verschlüsselt (AES-256-GCM, Schlüssel per PBKDF2 aus dem Master-Passwort) auf diesem Gerät im Anwendungsordner. Chats sind darin ebenfalls verschlüsselt."),
     section("Sichern", toolbar("Verschlüsselte Datei herunterladen", downloadVault)),
     section("Wiederherstellen", importForm()),
     section("Master-Passwort ändern", passwordForm()),
@@ -429,11 +429,11 @@ function actionRow() {
       closeSettings();
       window.dispatchEvent(new Event("vault-changed"));
     }),
-    button("Gespeicherte Daten im Browser löschen", "btn-danger", async () => {
-      if (!(await confirmDialog("Alle Agenten, Provider und Prompts aus dem Browser entfernen? Eine heruntergeladene Datei bleibt erhalten."))) {
+    button("Gespeicherte Daten auf diesem Gerät löschen", "btn-danger", async () => {
+      if (!(await confirmDialog("Alle Agenten, Provider, Prompts und Chats vom Gerät entfernen? Eine heruntergeladene Datei bleibt erhalten."))) {
         return;
       }
-      forgetVault();
+      await forgetVault();
       closeSettings();
       window.dispatchEvent(new Event("vault-changed"));
     })

@@ -1,37 +1,30 @@
 import { initChat, sendQuestion } from "/js/chat.js";
-import { restoreVault } from "/js/vault.js";
+import { restoreVault, vaultData } from "/js/vault.js";
+import { pickBrave, pickPerplexity, searchImages, searchWeb } from "/js/rag.js";
 import { initSettings, requireVault } from "/js/settings.js";
-import { initViews, savedView, showView } from "/js/views.js";
+import { activeView, initViews, savedView, showView } from "/js/views.js";
 
 const DB_NAME = "opensearchy";
 const DB_VERSION = 2;
 const DB_STORE = "cache";
-const WIKI_API = "https://de.wikipedia.org/w/api.php";
-const WIKIDATA_SPARQL = "https://query.wikidata.org/sparql";
-const PAGE_SIZE = 20;
-const SEARCH_BATCHES = 1;
 const MAX_QUERY_CHARS = 200;
 const SEARCH_TTL = 10 * 60 * 1000;
-const ENTITY_TTL = 60 * 60 * 1000;
-const CLASS_TTL = 24 * 60 * 60 * 1000;
-// Wikidata: Unternehmen, Firma, Enterprise
-const COMPANY_CLASSES = ["Q4830453", "Q783794", "Q6881511"];
-// Relevanz-Gewichte
-const TIER_WEIGHT = 1000;
-const POPULARITY_WEIGHT = 1;
-const WEBSITE_BOOST = 300; // Boost für Ergebnisse mit externem Link
 
 const form = document.querySelector("form");
 const input = form.querySelector('input[name="q"]');
 const statusEl = document.getElementById("status");
 const results = document.getElementById("results");
-const moreLink = document.getElementById("more");
+const imagesStatus = document.getElementById("images-status");
+const imageResults = document.getElementById("image-results");
 
-let currentQuery = "";
-let nextOffset = null;
-let total = 0;
 let activeRequest = 0;
+let activeImageRequest = 0;
+let requestedWebQuery = "";
+let requestedImageQuery = "";
+let loadedWebQuery = "";
+let loadedImageQuery = "";
 let dbPromise = null;
+let currentQuery = "";
 
 function openDb() {
   if (!dbPromise) {
@@ -97,260 +90,37 @@ async function cacheCleanup() {
   }
 }
 
-async function getJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
-}
-
-async function sparql(query) {
-  const data = await getJson(`${WIKIDATA_SPARQL}?format=json&query=${encodeURIComponent(query)}`);
-  return data.results.bindings;
-}
-
-function wikiId(uri) {
-  return uri.split("/").pop();
-}
-
-function isQid(id) {
-  return /^Q\d+$/.test(id);
-}
-
-// Liefert je QID Unternehmensstatus und Webseite; Ergebnisse werden im Browser gecacht.
-async function findCompanies(qids) {
-  const companies = new Map();
-  const missing = [];
-  for (const id of new Set(qids.filter(isQid))) {
-    const entity = await cacheGet(`entity:${id}`);
-    if (entity) companies.set(id, entity);
-    else missing.push(id);
-  }
-  if (missing.length === 0) return companies;
-
-  // Direkte Klassen (P31) sind schnell abfragbar; die Hierarchie wird nur für neue Klassen geprüft.
-  // Website: direkt (P856), Muttergesellschaft (P749), Tochter (P355), Domain (P13337)
-  // Company-Klasse: direkt (P31) oder über Muttergesellschaft (P749/P31)
-  let bindings;
-  try {
-    bindings = await sparql(
-      "SELECT ?item ?class ?parentClass ?website ?domain ?source WHERE { " +
-        `VALUES ?item { ${missing.map((id) => `wd:${id}`).join(" ")} } ` +
-        "?item wdt:P31 ?class . " +
-        "OPTIONAL { ?item wdt:P749 ?parent . ?parent wdt:P31 ?parentClass . } " +
-        "OPTIONAL { " +
-        "  { ?item wdt:P856 ?website . BIND('direct' AS ?source) } " +
-        "  UNION { ?item wdt:P749/wdt:P856 ?website . BIND('parent' AS ?source) } " +
-        "  UNION { ?item wdt:P355/wdt:P856 ?website . BIND('subsidiary' AS ?source) } " +
-        "  UNION { ?item wdt:P13337 ?domain . BIND('domain' AS ?source) } " +
-        "} }"
-    );
-  } catch (err) {
-    console.warn("Unternehmensprüfung fehlgeschlagen", err);
-    return companies;
-  }
-
-  const itemClasses = new Map();
-  const itemWebsites = new Map(); // id -> [{url, source}]
-  for (const binding of bindings) {
-    if (!binding.item) continue;
-    const id = wikiId(binding.item.value);
-    if (!itemClasses.has(id)) itemClasses.set(id, []);
-    if (binding.class) itemClasses.get(id).push(wikiId(binding.class.value));
-    if (binding.parentClass) itemClasses.get(id).push(wikiId(binding.parentClass.value));
-    // Website aus P856
-    const url = safeUrl(binding.website?.value);
-    if (url) {
-      const source = binding.source?.value ?? 'unknown';
-      if (!itemWebsites.has(id)) itemWebsites.set(id, []);
-      itemWebsites.get(id).push({ url, source });
-    }
-    // Website aus P13337 (domain name) konstruieren
-    const domain = binding.domain?.value;
-    if (domain && typeof domain === 'string' && domain.includes('.')) {
-      const constructedUrl = 'https://' + domain.replace(/^https?:\/\//, '').split('/')[0];
-      const validated = safeUrl(constructedUrl);
-      if (validated) {
-        if (!itemWebsites.has(id)) itemWebsites.set(id, []);
-        // Prüfen ob schon vorhanden
-        if (!itemWebsites.get(id).some(w => w.url === validated)) {
-          itemWebsites.get(id).push({ url: validated, source: 'domain' });
-        }
-      }
-    }
-  }
-
-  const flags = new Map();
-  const unknown = [];
-  for (const cls of new Set([...itemClasses.values()].flat())) {
-    const known = await cacheGet(`class:${cls}`);
-    if (known === undefined) unknown.push(cls);
-    else flags.set(cls, known);
-  }
-  if (unknown.length > 0) {
-    try {
-      const rows = await sparql(
-        "SELECT DISTINCT ?class WHERE { " +
-          `VALUES ?class { ${unknown.map((id) => `wd:${id}`).join(" ")} } ` +
-          `VALUES ?root { ${COMPANY_CLASSES.map((id) => `wd:${id}`).join(" ")} } ` +
-          "?class wdt:P279* ?root . }"
-      );
-      const companyClasses = new Set(rows.filter((row) => row.class).map((row) => wikiId(row.class.value)));
-      for (const cls of unknown) {
-        const isCompany = companyClasses.has(cls);
-        flags.set(cls, isCompany);
-        await cachePut(`class:${cls}`, isCompany, CLASS_TTL);
-      }
-    } catch (err) {
-      console.warn("Klassenprüfung fehlgeschlagen", err);
-      return companies;
-    }
-  }
-
-  for (const id of missing) {
-    const isCompany = (itemClasses.get(id) ?? []).some((cls) => flags.get(cls) === true);
-    // Beste Website wählen: direct > parent > subsidiary > domain, dann längste Domain (spezifischste)
-    const sites = itemWebsites.get(id) ?? [];
-    let website = null;
-    if (sites.length > 0) {
-      const sourceOrder = { direct: 0, parent: 1, subsidiary: 2, domain: 3, unknown: 4 };
-      sites.sort((a, b) => (sourceOrder[a.source] ?? 4) - (sourceOrder[b.source] ?? 4) || b.url.length - a.url.length);
-      website = sites[0].url;
-    }
-    const entity = { is_company: isCompany, website };
-    await cachePut(`entity:${id}`, entity, ENTITY_TTL);
-    companies.set(id, entity);
-  }
-  return companies;
-}
-
-async function wikiSearch(term, offset) {
-  const params = new URLSearchParams({
-    action: "query",
-    format: "json",
-    formatversion: "2",
-    origin: "*",
-    generator: "search",
-    gsrsearch: term,
-    gsrnamespace: "0",
-    gsrlimit: String(PAGE_SIZE),
-    gsroffset: String(offset),
-    prop: "extracts|pageprops|info",
-    exintro: "1",
-    explaintext: "1",
-    exlimit: String(PAGE_SIZE),
-    exchars: "400",
-    ppprop: "wikibase_item",
-    inprop: "url",
-  });
-  const data = await getJson(`${WIKI_API}?${params}`);
-  if (data.error) throw new Error(data.error.info);
-
-  return data.query?.pages ?? [];
-}
-
-// Holt Pageviews für eine Liste von PageIDs (letzte 30 Tage, Summe).
-async function fetchPageviews(pageids) {
-  if (pageids.length === 0) return new Map();
-  const key = `views:${pageids.join(",")}`;
-  const cached = await cacheGet(key);
-  if (cached) return new Map(Object.entries(cached));
-
-  const chunks = [];
-  for (let i = 0; i < pageids.length; i += 50) {
-    chunks.push(pageids.slice(i, i + 50));
-  }
-
-  const allViews = new Map();
-  await Promise.all(chunks.map(async (chunk) => {
-    const params = new URLSearchParams({
-      action: "query",
-      format: "json",
-      formatversion: "2",
-      origin: "*",
-      pageids: chunk.join("|"),
-      prop: "pageviews",
-    });
-    try {
-      const data = await getJson(`${WIKI_API}?${params}`);
-      for (const page of data.query?.pages ?? []) {
-        const views = page.pageviews
-          ? Object.values(page.pageviews).reduce((a, b) => a + (b || 0), 0)
-          : 0;
-        allViews.set(page.pageid, views);
-      }
-    } catch (err) {
-      console.warn("Pageviews fehlgeschlagen", err);
-    }
-  }));
-
-  await cachePut(key, Object.fromEntries(allViews), SEARCH_TTL);
-  return allViews;
-}
-
-function normalize(text) {
-  return text.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-// Niedriger ist besser: exakter Titel, Titel mit Zusatz, Titelanfang, alle Wörter, Teiltreffer.
-function relevanceTier(title, query) {
-  const q = normalize(query);
-  const full = normalize(title);
-  const base = normalize(title.replace(/\s*\([^()]*\)\s*$/, ""));
-  if (full === q) return 0;
-  if (base === q) return 1;
-  if (base.startsWith(`${q} `)) return 2;
-  const words = new Set(base.split(/[^\p{L}\p{N}]+/u));
-  if (q.split(" ").every((word) => words.has(word))) return 3;
-  if (full.includes(q)) return 4;
-  return 5;
-}
-
+// Treffer kommen von Perplexity direkt oder über OpenRouter und werden pro Suchbegriff gecacht.
 async function fetchResults(query) {
-  const key = `ranked:${query}`;
+  const normalizedQuery = query.replace(/\s+/g, " ").trim();
+  const key = `web:v5:${normalizedQuery.toLocaleLowerCase("de")}`;
   const cached = await cacheGet(key);
   if (cached) return cached;
 
-  const pages = await wikiSearch(query, 0);
-  if (pages.length === 0) return [];
+  if (!(await requireVault())) throw new Error("Speicher ist gesperrt.");
+  const provider = pickPerplexity(vaultData().providers);
+  if (!provider?.apiKey) throw new Error("Kein API-Key für Perplexity oder OpenRouter. Bitte in den Einstellungen hinterlegen.");
+  const { citations } = await searchWeb({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, query: normalizedQuery });
+  const hits = citations.map(({ title, url, content }) => ({ title, url, description: content }));
 
-  // Parallel: Company-Check + Pageviews
-  const qids = pages.map((p) => p.pageprops?.wikibase_item).filter(Boolean);
-  const pageids = pages.map((p) => p.pageid).filter(Boolean);
-  const [companies, views] = await Promise.all([
-    findCompanies(qids),
-    fetchPageviews(pageids),
-  ]);
+  await cachePut(key, hits, SEARCH_TTL);
+  return hits;
+}
 
-  const ranked = pages
-    .map((page) => {
-      const company = companies.get(page.pageprops?.wikibase_item);
-      const isCompany = company?.is_company === true;
-      const viewCount = views.get(page.pageid) || 0;
-      // URL bestimmen: Company → Firmenwebsite, sonst Wikipedia-URL
-      const url = isCompany ? company.website : (page.fullurl ?? null);
-      const hasExternalUrl = safeUrl(url) !== null;
-      const hit = {
-        title: page.title,
-        description: page.extract || null,
-        url,
-        is_company: isCompany,
-        views: viewCount,
-      };
-      const tier = relevanceTier(page.title, query);
-      // Score: niedriger tier = besser, höhere views = besser
-      // tier 0 (exakt) → 0, tier 1 → 1000, etc.
-      // views: log10(views + 1) * POPULARITY_WEIGHT
-      // Boost für externe Links (Firmenwebsite oder Wikipedia)
-      const websiteBoost = hasExternalUrl ? WEBSITE_BOOST : 0;
-      const popularity = Math.log10(viewCount + 1) * POPULARITY_WEIGHT;
-      const score = tier * TIER_WEIGHT - popularity - websiteBoost;
-      return { hit, score };
-    })
-    .sort((a, b) => a.score - b.score)
-    .map(({ hit }) => hit);
+async function fetchImages(query) {
+  const normalizedQuery = query.replace(/\s+/g, " ").trim();
+  const key = `images:v3:${normalizedQuery.toLocaleLowerCase("de")}`;
+  const cached = await cacheGet(key);
+  if (cached) return cached;
 
-  await cachePut(key, ranked, SEARCH_TTL);
-  return ranked;
+  await restoreVault();
+  const brave = pickBrave(vaultData()?.providers ?? []);
+  const result = await searchImages({
+    braveApiKey: brave?.apiKey ?? "",
+    query: normalizedQuery,
+  });
+  await cachePut(key, result, SEARCH_TTL);
+  return result;
 }
 
 function el(tag, className, text, attrs = {}) {
@@ -365,71 +135,156 @@ function safeUrl(url) {
   return typeof url === "string" && /^https?:\/\//.test(url) ? url : null;
 }
 
+// Jeder Treffer: Titel, darunter die URL als Trennlinie zum nächsten Treffer, dann die Beschreibung.
 function renderHit(hit) {
   const url = safeUrl(hit.url);
-  const linkAttrs = { target: "_blank", rel: "noopener noreferrer" };
   const li = el("li", "result");
-
   li.append(url
-    ? el("a", "title", hit.title, { href: url, ...linkAttrs })
+    ? el("a", "title", hit.title, { href: url, target: "_blank", rel: "noopener noreferrer" })
     : el("span", "title", hit.title));
-
-  if (hit.is_company) li.append(el("span", "badge", "Unternehmen"));
-
-  if (url) {
-    li.append(el("cite", "url", url.replace(/^https?:\/\//, "")));
-  } else if (hit.is_company) {
-    li.append(el("span", "note", "Keine Webseite in Wikidata hinterlegt"));
-  }
-
-  if (hit.description) {
-    const p = el("p", "description");
-    if (url && hit.is_company) {
-      p.append(el("a", null, hit.description, { href: url, ...linkAttrs }));
-    } else {
-      p.textContent = hit.description;
-    }
-    li.append(p);
-  }
+  if (url) li.append(el("cite", "url", url.replace(/^https?:\/\//, "")));
+  li.append(hit.description
+    ? el("p", "description", hit.description)
+    : el("p", "note", "Keine Beschreibung verfügbar."));
   return li;
 }
 
-async function runSearch(query, offset) {
-  const request = ++activeRequest;
-  const append = offset > 0;
-  currentQuery = query;
-  moreLink.hidden = true;
-  if (query.length > MAX_QUERY_CHARS) {
-    statusEl.textContent = "Fehler: Suchbegriff ist zu lang.";
+function renderImage(hit) {
+  const pageUrl = safeUrl(hit.pageUrl);
+  const imageUrl = safeUrl(hit.imageUrl);
+  if (!pageUrl || !imageUrl) return null;
+  const card = pageUrl ? el("a", "image-card", undefined, {
+    href: pageUrl,
+    target: "_blank",
+    rel: "noopener noreferrer",
+  }) : el("article", "image-card");
+  const frame = el("div", "image-frame");
+  const image = el("img", "image-result", undefined, {
+    src: imageUrl,
+    alt: hit.title || "Suchergebnis",
+    loading: "lazy",
+    decoding: "async",
+    referrerpolicy: "no-referrer",
+  });
+  image.addEventListener("error", () => {
+    frame.replaceChildren(el("span", "image-error", "Bild nicht verfügbar"));
+    card.classList.add("unavailable");
+  }, { once: true });
+  frame.append(image);
+  card.append(frame, el("span", "image-title", hit.title || "Bild öffnen"));
+  card.append(el("span", "image-source", new URL(pageUrl).hostname.replace(/^www\./, "")));
+  return card;
+}
+
+async function runImageSearch(query) {
+  const normalizedQuery = query.replace(/\s+/g, " ").trim();
+  if (!normalizedQuery) {
+    imagesStatus.textContent = "Suchbegriff eingeben, um Bilder zu finden.";
+    imageResults.replaceChildren();
+    loadedImageQuery = "";
     return;
   }
-  statusEl.textContent = "Suche läuft …";
-
+  const queryKey = normalizedQuery.toLocaleLowerCase("de");
+  if (normalizedQuery.length > MAX_QUERY_CHARS) {
+    imagesStatus.textContent = "Fehler: Suchbegriff ist zu lang.";
+    return;
+  }
+  if (queryKey === requestedImageQuery || queryKey === loadedImageQuery) return;
+  requestedImageQuery = queryKey;
+  const request = ++activeImageRequest;
+  imageResults.replaceChildren();
+  imagesStatus.textContent = "Bilder werden gesucht …";
   try {
-    const hits = await fetchResults(query);
-    if (request !== activeRequest) return;
-
-    if (!append) results.replaceChildren();
-    results.append(...hits.slice(offset, offset + PAGE_SIZE).map(renderHit));
-    total = hits.length;
-    nextOffset = offset + PAGE_SIZE < hits.length ? offset + PAGE_SIZE : null;
-    statusEl.textContent = total === 0 ? "Keine Ergebnisse gefunden." : `${total} Ergebnisse`;
-    moreLink.hidden = nextOffset == null;
+    const { images, providers } = await fetchImages(normalizedQuery);
+    if (request !== activeImageRequest) return;
+    const cards = images.map(renderImage).filter(Boolean);
+    imageResults.append(...cards);
+    loadedImageQuery = normalizedQuery.toLocaleLowerCase("de");
+    const sourceText = providers.length ? ` · ${providers.join(", ")}` : "";
+    imagesStatus.textContent = cards.length ? `${cards.length} Bilder${sourceText}` : "Keine Bilder gefunden.";
   } catch (err) {
-    if (request === activeRequest) statusEl.textContent = `Fehler: ${err.message}`;
+    if (request === activeImageRequest) imagesStatus.textContent = `Fehler: ${err.message}`;
+  } finally {
+    if (requestedImageQuery === queryKey) requestedImageQuery = "";
   }
 }
 
-function runFromUrl() {
-  const query = (new URLSearchParams(location.search).get("q") || "").trim();
-  input.value = query;
-  if (query) {
-    runSearch(query, 0);
-  } else {
-    results.replaceChildren();
-    statusEl.textContent = "";
-    moreLink.hidden = true;
+async function runSearch(query) {
+  const normalizedQuery = query.replace(/\s+/g, " ").trim();
+  const queryKey = normalizedQuery.toLocaleLowerCase("de");
+  if (!normalizedQuery || queryKey === requestedWebQuery || queryKey === loadedWebQuery) return;
+  if (normalizedQuery.length > MAX_QUERY_CHARS) {
+    statusEl.textContent = "Fehler: Suchbegriff ist zu lang.";
+    return;
   }
+  requestedWebQuery = queryKey;
+  const request = ++activeRequest;
+  results.replaceChildren();
+  statusEl.textContent = "Suche läuft …";
+
+  try {
+    const hits = await fetchResults(normalizedQuery);
+    if (request !== activeRequest) return;
+    results.append(...hits.map(renderHit));
+    loadedWebQuery = queryKey;
+    statusEl.textContent = hits.length === 0 ? "Keine Ergebnisse gefunden." : `${hits.length} Ergebnisse`;
+  } catch (err) {
+    if (request === activeRequest) statusEl.textContent = `Fehler: ${err.message}`;
+  } finally {
+    if (requestedWebQuery === queryKey) requestedWebQuery = "";
+  }
+}
+
+function applyQuery(query) {
+  currentQuery = query.replace(/\s+/g, " ").trim();
+  input.value = currentQuery;
+  if (!currentQuery) {
+    activeRequest += 1;
+    activeImageRequest += 1;
+    results.replaceChildren();
+    imageResults.replaceChildren();
+    statusEl.textContent = "";
+    imagesStatus.textContent = "";
+    requestedWebQuery = "";
+    requestedImageQuery = "";
+    loadedWebQuery = "";
+    loadedImageQuery = "";
+    return;
+  }
+  window.dispatchEvent(new CustomEvent("query-changed", { detail: currentQuery }));
+}
+
+function renderCurrentView() {
+  if (!currentQuery) return;
+  if (activeView() === "images") {
+    runImageSearch(currentQuery);
+  } else if (activeView() === "search") {
+    runSearch(currentQuery);
+  }
+}
+
+function runCurrentQuery() {
+  if (!currentQuery) return;
+  void Promise.allSettled([
+    runSearch(currentQuery),
+    runImageSearch(currentQuery),
+  ]);
+}
+
+function runFromUrl() {
+  applyQuery(new URLSearchParams(location.search).get("q") ?? "");
+  document.body.classList.add("search-home");
+}
+
+function isReload() {
+  return performance.getEntriesByType("navigation")[0]?.type === "reload";
+}
+
+function clearQueryOnReload() {
+  if (!isReload() || !new URLSearchParams(location.search).has("q")) return;
+  const url = new URL(location.href);
+  url.searchParams.delete("q");
+  history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 // Ab dieser Wortzahl (oder mit Fragezeichen) gilt die Eingabe als Satz und geht in den Chat.
@@ -437,6 +292,14 @@ const SENTENCE_MIN_WORDS = 4;
 
 function isSentence(query) {
   return query.endsWith("?") || query.split(/\s+/).length >= SENTENCE_MIN_WORDS;
+}
+
+// Erkennt Eingaben wie "example.de", "www.example.com/pfad" oder "https://example.org" (ohne Leerzeichen).
+const DOMAIN_PATTERN = /^(?:https?:\/\/)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?:[/?#]\S*)?$/i;
+
+function domainUrl(query) {
+  if (!DOMAIN_PATTERN.test(query)) return null;
+  return new URL(/^https?:\/\//i.test(query) ? query : `https://${query}`).href;
 }
 
 async function openChatWith(question) {
@@ -449,32 +312,35 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const query = input.value.trim();
   if (!query) return;
+  const url = domainUrl(query);
+  if (url) {
+    location.href = url;
+    return;
+  }
   if (isSentence(query)) {
     input.value = "";
     await openChatWith(query);
     return;
   }
   history.pushState(null, "", `/?q=${encodeURIComponent(query)}`);
-  showView("search");
-  runSearch(query, 0);
-});
-
-moreLink.addEventListener("click", (event) => {
-  event.preventDefault();
-  if (nextOffset != null) runSearch(currentQuery, nextOffset);
+  applyQuery(query);
 });
 
 window.addEventListener("popstate", runFromUrl);
+window.addEventListener("query-changed", runCurrentQuery);
+window.addEventListener("view-changed", renderCurrentView);
 
 cacheCleanup();
 initSettings();
 initChat();
 initViews();
+clearQueryOnReload();
 runFromUrl();
 restoreVault().then((restored) => {
-  if (!restored) return;
-  window.dispatchEvent(new Event("vault-changed"));
-  // Nach dem Neuladen zur Chat-Ansicht zurückkehren, außer bei einer Suche in der URL.
-  const hasQuery = new URLSearchParams(location.search).has("q");
-  if (savedView() === "chat" && !hasQuery) showView("chat");
+  if (restored) window.dispatchEvent(new Event("vault-changed"));
+  if (!isReload()) return;
+  const previousView = savedView();
+  if (!previousView || previousView === "search") return;
+  if (previousView === "chat" && !restored) return;
+  showView(previousView);
 });

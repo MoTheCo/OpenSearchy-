@@ -1,22 +1,22 @@
 import { el } from "/js/dom.js";
 import { completeChat } from "/js/llm.js";
 import { loadModels } from "/js/models.js";
-import { retrieveSources } from "/js/rag.js";
-import { openNewAgent, requireVault } from "/js/settings.js";
-import { isUnlocked, vaultData } from "/js/vault.js";
+import { pickPerplexity, retrieveSources } from "/js/rag.js";
+import { confirmDialog, openNewAgent, requireVault } from "/js/settings.js";
+import { isUnlocked, saveVault, vaultData } from "/js/vault.js";
 
 const DIRECT_SYSTEM_PROMPT = "Du bist ein hilfreicher Assistent.";
 const DRAFT_INSTRUCTIONS =
   'Antworte auf Deutsch aus deinem eigenen Wissen. Gib ausschließlich JSON zurück: {"answer": "<deine Antwort>", "confidence": <Zahl von 0 bis 1 für deine Sicherheit>}.';
 // Ergänzung des Systemprompts, nur wenn der Nutzer nach Quellen fragt.
 const KEYWORD_INSTRUCTIONS =
-  'Der Nutzer möchte Quellen. Ergänze das JSON um "keywords": ein Array mit 2 bis 5 Suchbegriffen für die Wikipedia-Suche, abgeleitet aus dem gesamten Gespräch (Eigennamen und Fachbegriffe, ohne Fragewörter).';
+  'Der Nutzer möchte Quellen. Ergänze das JSON um "keywords": ein Array mit 2 bis 5 Suchbegriffen für die Websuche, abgeleitet aus dem gesamten Gespräch (Eigennamen und Fachbegriffe, ohne Fragewörter).';
 // Wörter, die im Nutzertext die Quellensuche auslösen.
 const SOURCE_TRIGGER = /quell|beleg|nachweis|\bsources?\b|\breferences?\b/i;
 const MAX_KEYWORDS = 5;
 const CHECK_INSTRUCTIONS =
-  'Prüfe den Entwurf anhand der Wikipedia-Auszüge und korrigiere ihn bei Bedarf. Kennzeichne belegte Aussagen mit der Quellennummer, z. B. [1]. Gib ausschließlich JSON zurück: {"answer": "<Antwort auf Deutsch>", "uses_sources": <true, wenn die Auszüge die Antwort stützen oder korrigieren, sonst false>, "sources": [<verwendete Quellennummern>]}.';
-// Unter diesem Wert prüft das LLM mit Wikipedia.
+  'Prüfe den Entwurf anhand der Quellenauszüge und korrigiere ihn bei Bedarf. Kennzeichne belegte Aussagen mit der Quellennummer, z. B. [1]. Gib ausschließlich JSON zurück: {"answer": "<Antwort auf Deutsch>", "uses_sources": <true, wenn die Auszüge die Antwort stützen oder korrigieren, sonst false>, "sources": [<verwendete Quellennummern>]}.';
+// Unter diesem Wert prüft das LLM mit Quellen.
 const CONFIDENCE_THRESHOLD = 0.45;
 const DIRECT_TEMPERATURE = 0.7;
 const DIRECT_MAX_TOKENS = 4000;
@@ -29,25 +29,34 @@ const form = document.getElementById("chat-form");
 const input = document.getElementById("chat-input");
 const submitBtn = document.getElementById("chat-submit");
 const newChatBtn = document.getElementById("new-chat-btn");
+const chatWorkspace = document.getElementById("chat-workspace");
+const historyList = document.getElementById("chat-history-list");
+const chatTitle = document.getElementById("chat-title");
+const openHistoryBtn = document.getElementById("open-history-btn");
+const closeHistoryBtn = document.getElementById("close-history-btn");
 
 const MENTION = /(^|\s)@([^\s@]*)$/;
 
 const CHAT_KEY = "opensearchy.chat";
-// Verlauf für das LLM, Anzeige-Einträge und letzter Quellenstand; bleiben über Neuladen erhalten.
-const saved = readJson(CHAT_KEY, {});
-let history = saved.history ?? [];
-let transcript = saved.transcript ?? [];
-let sourcesState = saved.sources ?? null;
+// Verlauf für das LLM, Anzeige-Einträge und letzter Quellenstand; liegen verschlüsselt im Vault und werden nach dem Entsperren geladen.
+let history = [];
+let transcript = [];
+let sourcesState = null;
+let archivedChats = [];
+let activeChatId = null;
+let historyOpen = true;
+let chatLoaded = false;
 let busy = false;
-let currentSources = sourcesState?.sources ?? [];
+let currentSources = [];
 let firstMentionPick = null;
 let mentionRun = 0;
-// Gewähltes Ziel: { agentId } oder { providerId, model }. Bleibt über Tabs und Neustarts im Browser erhalten.
+// Gewähltes Ziel: { agentId } oder { providerId, model }. Liegt zusammen mit den Chats verschlüsselt im Vault.
 const TARGET_KEY = "opensearchy.chatTarget";
 const RECENT_KEY = "opensearchy.recentTargets";
 const RECENT_LIMIT = 5;
 const chipsEl = document.getElementById("chat-chips");
-let target = readJson(TARGET_KEY, null);
+let target = null;
+let recentTargets = [];
 
 function readJson(key, fallback) {
   try {
@@ -64,12 +73,9 @@ function sameTarget(a, b) {
 function setTarget(next) {
   target = next;
   if (next) {
-    localStorage.setItem(TARGET_KEY, JSON.stringify(next));
-    const recent = readJson(RECENT_KEY, []).filter((item) => !sameTarget(item, next));
-    localStorage.setItem(RECENT_KEY, JSON.stringify([next, ...recent].slice(0, RECENT_LIMIT)));
-  } else {
-    localStorage.removeItem(TARGET_KEY);
+    recentTargets = [next, ...recentTargets.filter((item) => !sameTarget(item, next))].slice(0, RECENT_LIMIT);
   }
+  saveChat();
   renderChips();
   updateSubmit();
 }
@@ -92,7 +98,7 @@ function renderChips() {
   if (isUnlocked()) {
     const data = vaultData();
     for (const agent of usableAgents(data)) items.push({ item: { agentId: agent.id }, label: agent.name });
-    for (const item of readJson(RECENT_KEY, [])) {
+    for (const item of recentTargets) {
       if (!targetExists(item) || items.some((entry) => sameTarget(entry.item, item))) continue;
       items.push({ item, label: targetName(item) });
     }
@@ -120,9 +126,19 @@ function selectTarget(item) {
 const mentionMenu = el("div", "mention-menu");
 mentionMenu.hidden = true;
 form.append(mentionMenu);
+const historyMenu = el("div", "chat-history-menu");
+historyMenu.hidden = true;
+document.body.append(historyMenu);
 
 export function initChat() {
   newChatBtn.addEventListener("click", resetChat);
+  openHistoryBtn.addEventListener("click", () => setHistoryOpen(true));
+  closeHistoryBtn.addEventListener("click", () => setHistoryOpen(false));
+  document.addEventListener("click", closeHistoryMenu);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeHistoryMenu();
+  });
+  window.addEventListener("resize", closeHistoryMenu);
   input.addEventListener("input", () => {
     updateSubmit();
     updateMention();
@@ -149,8 +165,14 @@ export function initChat() {
     }
   });
   form.addEventListener("submit", onSubmit);
-  window.addEventListener("vault-changed", dropStaleTarget);
-  restoreChat();
+  window.addEventListener("vault-changed", () => {
+    dropStaleTarget();
+    if (isUnlocked()) {
+      if (!chatLoaded) loadChat();
+    } else {
+      clearLoadedChat();
+    }
+  });
   renderChips();
 }
 
@@ -199,7 +221,7 @@ async function renderMentionMenu(query) {
 
   const modelCol = el("div", "mention-col");
   modelCol.append(el("h3", null, "Modelle"));
-  const recent = readJson(RECENT_KEY, []).filter((item) => {
+  const recent = recentTargets.filter((item) => {
     if (!isUnlocked() || !item.providerId || !targetExists(item)) return false;
     const providerName = data.providers.find((provider) => provider.id === item.providerId)?.name ?? "";
     return `${providerName} ${item.model}`.toLowerCase().includes(query);
@@ -223,7 +245,7 @@ async function renderMentionMenu(query) {
   const agentCol = el("div", "mention-col");
   agentCol.append(el("h3", null, "Agenten"));
   const usable = usableAgents(data);
-  const recentAgents = readJson(RECENT_KEY, [])
+  const recentAgents = recentTargets
     .filter((item) => item.agentId && isUnlocked() && targetExists(item))
     .map((item) => usable.find((agent) => agent.id === item.agentId))
     .filter((agent) => agent && agent.name.toLowerCase().includes(query));
@@ -300,16 +322,192 @@ function questionText() {
   return name ? raw.split(`@${name}`).join("").trim() : raw;
 }
 
+function archiveCurrentChat() {
+  if (transcript.length || history.length) {
+    const firstQuestion = transcript.find((entry) => entry.role === "user")?.text ?? "Chat";
+    const id = activeChatId ?? crypto.randomUUID();
+    archivedChats = archivedChats.filter((chat) => chat.id !== id);
+    archivedChats.unshift({
+      id,
+      createdAt: new Date().toISOString(),
+      title: firstQuestion.slice(0, 80),
+      history,
+      transcript,
+      sources: sourcesState,
+    });
+  }
+}
+
 function resetChat() {
+  archiveCurrentChat();
+  activeChatId = crypto.randomUUID();
   history = [];
   transcript = [];
+  sourcesState = null;
   messagesEl.replaceChildren();
   renderSources([]);
+  renderChatHistory();
+  updateChatTitle();
   saveChat();
 }
 
 function saveChat() {
-  localStorage.setItem(CHAT_KEY, JSON.stringify({ history, transcript, sources: sourcesState }));
+  if (!chatLoaded || !isUnlocked()) return;
+  const data = vaultData();
+  data.chat = { id: activeChatId, history, transcript, sources: sourcesState };
+  data.chats = archivedChats;
+  data.chatPreferences = { target, recent: recentTargets, historyOpen };
+  saveVault().catch((err) => console.warn("Chat konnte nicht gespeichert werden", err));
+}
+
+function clearLoadedChat() {
+  chatLoaded = false;
+  history = [];
+  transcript = [];
+  sourcesState = null;
+  archivedChats = [];
+  activeChatId = null;
+  target = null;
+  recentTargets = [];
+  messagesEl.replaceChildren();
+  renderSources([]);
+  renderChatHistory();
+  updateChatTitle();
+  renderChips();
+}
+
+// Lädt Verlauf, Archiv und zuletzt verwendetes Ziel aus dem entsperrten Vault.
+// Alte Browserdaten werden genau einmal übernommen und anschließend entfernt.
+function loadChat() {
+  const data = vaultData();
+  const legacyChat = readJson(CHAT_KEY, null);
+  const legacyTarget = readJson(TARGET_KEY, null);
+  const legacyRecent = readJson(RECENT_KEY, []);
+  const saved = data.chat ?? legacyChat ?? {};
+  archivedChats = Array.isArray(data.chats) ? data.chats : [];
+  activeChatId = saved.id ?? crypto.randomUUID();
+  history = saved.history ?? [];
+  transcript = saved.transcript ?? [];
+  sourcesState = saved.sources ?? null;
+  currentSources = sourcesState?.sources ?? [];
+  target = data.chatPreferences?.target ?? legacyTarget;
+  recentTargets = Array.isArray(data.chatPreferences?.recent) ? data.chatPreferences.recent : legacyRecent;
+  historyOpen = data.chatPreferences?.historyOpen !== false;
+  chatLoaded = true;
+  messagesEl.replaceChildren();
+  restoreChat();
+  setHistoryOpen(historyOpen, false);
+  renderChatHistory();
+  updateChatTitle();
+  renderChips();
+  if (legacyChat !== null || legacyTarget !== null || legacyRecent.length) {
+    localStorage.removeItem(CHAT_KEY);
+    localStorage.removeItem(TARGET_KEY);
+    localStorage.removeItem(RECENT_KEY);
+    saveChat();
+  }
+}
+
+function setHistoryOpen(open, persist = true) {
+  historyOpen = open;
+  chatWorkspace.classList.toggle("history-closed", !open);
+  if (persist) saveChat();
+}
+
+function updateChatTitle() {
+  const question = transcript.find((entry) => entry.role === "user")?.text ?? "";
+  chatTitle.textContent = question ? question.slice(0, 48) : "Chat";
+}
+
+function renderChatHistory() {
+  historyList.replaceChildren();
+  const visibleChats = [...archivedChats.filter((chat) => chat.id !== activeChatId)];
+  if (transcript.length || history.length) {
+    const question = transcript.find((entry) => entry.role === "user")?.text ?? "Chat";
+    visibleChats.unshift({
+      id: activeChatId,
+      createdAt: new Date().toISOString(),
+      title: question.slice(0, 80),
+    });
+  }
+  if (!visibleChats.length) {
+    historyList.append(el("p", "chat-history-empty", "Noch keine vergangenen Chats. Mit „＋“ wird der aktuelle Chat hier abgelegt."));
+    return;
+  }
+  for (const chat of visibleChats) {
+    const item = el("button", "chat-history-item", undefined, {
+      type: "button",
+      title: chat.title ?? "Chat öffnen",
+    });
+    item.append(el("span", "chat-history-item-title", chat.title ?? "Chat"));
+    item.classList.toggle("active", chat.id === activeChatId);
+    if (chat.createdAt) {
+      const date = new Date(chat.createdAt);
+      if (!Number.isNaN(date.valueOf())) {
+        item.append(el("span", "chat-history-item-date", new Intl.DateTimeFormat("de", {
+          dateStyle: "medium",
+          timeStyle: "short",
+        }).format(date)));
+      }
+    }
+    item.addEventListener("click", () => openArchivedChat(chat.id));
+    item.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      showHistoryMenu(event.clientX, event.clientY, chat);
+    });
+    historyList.append(item);
+  }
+}
+
+function closeHistoryMenu() {
+  historyMenu.hidden = true;
+  historyMenu.replaceChildren();
+}
+
+function showHistoryMenu(x, y, chat) {
+  closeHistoryMenu();
+  const remove = el("button", "chat-history-menu-action", "Chat löschen", { type: "button" });
+  remove.addEventListener("click", async () => {
+    closeHistoryMenu();
+    if (!(await confirmDialog(`„${chat.title ?? "Chat"}“ löschen?`))) return;
+    archivedChats = archivedChats.filter((item) => item.id !== chat.id);
+    if (activeChatId === chat.id) {
+      activeChatId = crypto.randomUUID();
+      history = [];
+      transcript = [];
+      sourcesState = null;
+      currentSources = [];
+      messagesEl.replaceChildren();
+      renderSources([]);
+      updateChatTitle();
+    }
+    renderChatHistory();
+    saveChat();
+  });
+  historyMenu.append(remove);
+  historyMenu.hidden = false;
+  const left = Math.min(x, window.innerWidth - historyMenu.offsetWidth - 8);
+  const top = Math.min(y, window.innerHeight - historyMenu.offsetHeight - 8);
+  historyMenu.style.left = `${Math.max(8, left)}px`;
+  historyMenu.style.top = `${Math.max(8, top)}px`;
+}
+
+function openArchivedChat(id) {
+  if (id === activeChatId) return;
+  const selected = archivedChats.find((chat) => chat.id === id);
+  if (!selected) return;
+  archiveCurrentChat();
+  activeChatId = selected.id;
+  history = selected.history ?? [];
+  transcript = selected.transcript ?? [];
+  sourcesState = selected.sources ?? null;
+  currentSources = sourcesState?.sources ?? [];
+  messagesEl.replaceChildren();
+  restoreChat();
+  renderChatHistory();
+  updateChatTitle();
+  saveChat();
+  input.focus();
 }
 
 // Zeigt den gespeicherten Verlauf und die Quellen des letzten Stands.
@@ -368,6 +566,8 @@ async function onSubmit(event) {
   updateSubmit();
   appendMessage("user", question);
   transcript.push({ role: "user", text: question });
+  updateChatTitle();
+  renderChatHistory();
   saveChat();
   const bubble = appendMessage("assistant", "Antwort wird aus eigenem Wissen erstellt …");
 
@@ -387,26 +587,26 @@ async function onSubmit(event) {
     let answer = draft.answer || "";
 
     if (!wantsSources && normalizeConfidence(draft.confidence) >= CONFIDENCE_THRESHOLD) {
-      renderSources([], question, "Antwort aus eigenem Wissen, nicht über Wikipedia geprüft.");
+      renderSources([], question, "Antwort aus eigenem Wissen, nicht über Quellen geprüft.");
     } else {
       // Mit Keywords des LLMs suchen; ohne Keywords dient die Frage als Suchtext.
       const query = (wantsSources && keywordQuery(draft.keywords)) || question;
-      bubble.textContent = "Wikipedia wird durchsucht …";
+      bubble.textContent = "Quellen werden gesucht …";
       let sources = [];
       let context = "";
       let notice = "";
       try {
-        ({ sources, context } = await retrieveSources(query));
+        ({ sources, context } = await retrieveSources(query, pickPerplexity(vaultData().providers)));
       } catch (err) {
-        notice = `Wikipedia nicht erreichbar (${err.message}).`;
+        notice = `Quellensuche fehlgeschlagen (${err.message}).`;
       }
       if (context) {
-        bubble.textContent = "Entwurf wird mit Wikipedia geprüft …";
+        bubble.textContent = "Entwurf wird mit Quellen geprüft …";
         const check = parseReply(
           await completeChat({
             ...base,
             messages: [
-              { role: "system", content: `${config.systemPrompt}\n\n${CHECK_INSTRUCTIONS}\n\nWikipedia-Auszüge:\n\n${context}` },
+              { role: "system", content: `${config.systemPrompt}\n\n${CHECK_INSTRUCTIONS}\n\nQuellenauszüge:\n\n${context}` },
               { role: "user", content: `Frage: ${question}\n\nEntwurf: ${answer}` },
             ],
           })
@@ -418,7 +618,7 @@ async function onSubmit(event) {
         const signal = wantsSources || check.uses_sources === true;
         renderSources(signal ? (shown.length ? shown : sources) : [], question, notice);
       } else {
-        renderSources([], question, wantsSources && !notice ? "Keine passenden Wikipedia-Quellen gefunden." : notice);
+        renderSources([], question, wantsSources && !notice ? "Keine passenden Quellen gefunden." : notice);
       }
     }
 
@@ -490,17 +690,13 @@ function renderAnswer(bubble, text, sources = currentSources) {
       bubble.append(part);
       continue;
     }
-    bubble.append(el("a", "cite", part, { href: sourceUrl(source), target: "_blank", rel: "noopener noreferrer", title: source.title }));
+    bubble.append(el("a", "cite", part, { href: source.url, target: "_blank", rel: "noopener noreferrer", title: source.title }));
   }
 }
 
 // Nur die Felder, die für die Zitat-Links nötig sind.
 function citationsOf(sources) {
   return sources.map(({ n, title, url }) => ({ n, title, url }));
-}
-
-function sourceUrl(source) {
-  return source.url || `https://de.wikipedia.org/wiki/${encodeURIComponent(source.title.replace(/ /g, "_"))}`;
 }
 
 function renderSources(sources, question = "", notice = "") {
@@ -526,7 +722,7 @@ function sourceItem(source) {
   item.id = `source-${source.n}`;
   const heading = el("div");
   heading.append(el("span", "source-number", `[${source.n}]`));
-  heading.append(el("a", "source-title", source.title, { href: sourceUrl(source), target: "_blank", rel: "noopener noreferrer" }));
+  heading.append(el("a", "source-title", source.title, { href: source.url, target: "_blank", rel: "noopener noreferrer" }));
   item.append(heading);
   for (const passage of source.passages) item.append(el("p", "source-passage", passage.text));
   return item;

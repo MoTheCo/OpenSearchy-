@@ -15,34 +15,48 @@
     <div class="main-content">
       <section class="search-panel">
         <form role="search" action="/" method="get" id="search-form">
-          <input type="search" name="q" placeholder="Wikipedia durchsuchen …" autocomplete="off" required>
+          <input type="search" name="q" placeholder="Web durchsuchen …" autocomplete="off" required>
           <button type="submit">Suchen</button>
         </form>
         <nav class="tabs" aria-label="Ansicht">
           <button type="button" class="tab-btn active" data-view="search" aria-pressed="true">Suche</button>
           <button type="button" class="tab-btn" data-view="chat" aria-pressed="false">Chat</button>
-          <button type="button" class="tab-btn" data-view="sources" aria-pressed="false">Quellen <span id="sources-count"></span></button>
+          <button type="button" class="tab-btn" data-view="images" aria-pressed="false">Bilder</button>
         </nav>
         <div id="view-search">
           <p id="status"></p>
           <ol id="results"></ol>
-          <a class="more" id="more" href="#" hidden>Weitere Ergebnisse</a>
         </div>
       </section>
-      <aside class="chat-panel" id="chat-panel" hidden>
-        <div class="chat-header">
-          <h2>Chat</h2>
-          <div class="chat-controls">
-            <button id="new-chat-btn" class="icon-btn" title="Neuer Chat" aria-label="Neuer Chat">＋</button>
+      <div class="chat-workspace" id="chat-workspace" hidden>
+        <aside class="chat-history" id="chat-history" aria-label="Vergangene Chats">
+          <div class="chat-history-header">
+            <h2>Chats</h2>
+            <button id="close-history-btn" class="icon-btn" title="Chat-Verlauf schließen" aria-label="Chat-Verlauf schließen">×</button>
           </div>
-        </div>
-        <div class="chat-messages" id="chat-messages"></div>
-        <div class="chat-chips" id="chat-chips" hidden></div>
-        <form class="chat-input-form" id="chat-form">
-          <textarea id="chat-input" placeholder="Frage stellen … (@ für Modell oder Agent)" rows="1" aria-label="Nachricht"></textarea>
-          <button type="submit" id="chat-submit" disabled>Senden</button>
-        </form>
-      </aside>
+          <div class="chat-history-list" id="chat-history-list"></div>
+        </aside>
+        <aside class="chat-panel" id="chat-panel">
+          <div class="chat-header">
+            <h2 id="chat-title">Chat</h2>
+            <div class="chat-controls">
+              <button id="open-history-btn" class="icon-btn" title="Chat-Verlauf öffnen" aria-label="Chat-Verlauf öffnen">≡</button>
+              <button id="new-chat-btn" class="icon-btn" title="Neuer Chat" aria-label="Neuer Chat">＋</button>
+            </div>
+          </div>
+          <div class="chat-messages" id="chat-messages"></div>
+          <div class="chat-chips" id="chat-chips" hidden></div>
+          <form class="chat-input-form" id="chat-form">
+            <textarea id="chat-input" placeholder="Frage stellen … (@ für Modell oder Agent)" rows="1" aria-label="Nachricht"></textarea>
+            <button type="submit" id="chat-submit" disabled>Senden</button>
+          </form>
+        </aside>
+      </div>
+      <section class="images-panel" id="images-panel" hidden>
+        <p class="images-status" id="images-status"></p>
+        <div class="image-results" id="image-results"></div>
+      </section>
+      <span id="sources-count" hidden></span>
       <aside class="sources-panel" id="sources-panel" hidden></aside>
     </div>
   </div>

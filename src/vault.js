@@ -1,9 +1,14 @@
+import { deleteRecord, readRecord, writeRecord } from "/js/store.js";
+
 const STORAGE_KEY = "opensearchy.vault";
 const SESSION_KEY = "opensearchy.session";
+const RECORD_NAME = "vault";
 const FORMAT = "opensearchy-vault";
 const VERSION = 1;
 const ITERATIONS = 600000;
 const DEFAULT_PROVIDERS = [
+  { id: "perplexity", name: "Perplexity", baseUrl: "https://api.perplexity.ai" },
+  { id: "brave-search", name: "Brave Search", baseUrl: "https://api.search.brave.com/res/v1" },
   { id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1" },
   { id: "mistral", name: "Mistral", baseUrl: "https://api.mistral.ai/v1" },
   { id: "groq", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" },
@@ -15,6 +20,10 @@ const decoder = new TextDecoder();
 
 let session = null;
 let data = null;
+// Verschlüsselter Vault wie er auf dem Gerät liegt; null, solange keiner existiert.
+let stored = null;
+let storeReady = null;
+let writeQueue = Promise.resolve();
 
 function toBase64(bytes) {
   return btoa(String.fromCharCode(...bytes));
@@ -25,7 +34,14 @@ function fromBase64(text) {
 }
 
 function emptyData() {
-  return { providers: [], prompts: [], agents: [] };
+  return {
+    providers: [],
+    prompts: [],
+    agents: [],
+    chat: { history: [], transcript: [], sources: null },
+    chats: [],
+    chatPreferences: { target: null, recent: [] },
+  };
 }
 
 async function deriveRaw(password, salt, iterations) {
@@ -102,11 +118,30 @@ async function openEnvelope(text, password) {
 }
 
 async function persist() {
-  localStorage.setItem(STORAGE_KEY, await seal());
+  const write = writeQueue.then(async () => {
+    stored = await seal();
+    await writeRecord(RECORD_NAME, stored);
+  });
+  writeQueue = write.catch(() => {});
+  return write;
+}
+
+// Lädt den verschlüsselten Vault vom Gerät; übernimmt einen älteren Vault aus dem Browser-Speicher.
+function loadVaultStore() {
+  storeReady ??= (async () => {
+    stored = await readRecord(RECORD_NAME);
+    const legacy = localStorage.getItem(STORAGE_KEY);
+    if (stored === null && legacy !== null) {
+      await writeRecord(RECORD_NAME, legacy);
+      stored = legacy;
+      localStorage.removeItem(STORAGE_KEY);
+    }
+  })();
+  return storeReady;
 }
 
 export function hasStoredVault() {
-  return localStorage.getItem(STORAGE_KEY) !== null;
+  return stored !== null;
 }
 
 export function isUnlocked() {
@@ -118,7 +153,7 @@ export function vaultData() {
 }
 
 export function exportVault() {
-  return localStorage.getItem(STORAGE_KEY) ?? "";
+  return stored ?? "";
 }
 
 export async function createVault(password) {
@@ -129,30 +164,40 @@ export async function createVault(password) {
 }
 
 export async function unlockVault(password) {
-  const opened = await openEnvelope(localStorage.getItem(STORAGE_KEY), password);
+  await loadVaultStore();
+  const opened = await openEnvelope(stored, password);
   session = opened.session;
-  data = opened.data;
+  data = withDefaultProviders(opened.data);
   saveSession();
+}
+
+function withDefaultProviders(current) {
+  const merged = { ...emptyData(), ...current };
+  const existingIds = new Set(merged.providers.map((provider) => provider.id));
+  for (const provider of DEFAULT_PROVIDERS) {
+    if (!existingIds.has(provider.id)) merged.providers.unshift({ ...provider });
+  }
+  return merged;
 }
 
 // Stellt die Sitzung aus sessionStorage wieder her, ohne erneut nach dem Passwort zu fragen.
 export async function restoreVault() {
   if (session) return true;
+  await loadVaultStore();
   const saved = sessionStorage.getItem(SESSION_KEY);
-  const text = localStorage.getItem(STORAGE_KEY);
-  if (!saved || !text) return false;
+  if (!saved || stored === null) return false;
   try {
-    const stored = JSON.parse(saved);
-    const raw = fromBase64(stored.raw);
+    const savedSession = JSON.parse(saved);
+    const raw = fromBase64(savedSession.raw);
     const key = await aesKey(raw);
-    const envelope = JSON.parse(text);
+    const envelope = JSON.parse(stored);
     const plain = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: fromBase64(envelope.cipher.iv) },
       key,
       fromBase64(envelope.data)
     );
-    session = { key, raw, salt: fromBase64(stored.salt), iterations: stored.iterations };
-    data = { ...emptyData(), ...JSON.parse(decoder.decode(plain)) };
+    session = { key, raw, salt: fromBase64(savedSession.salt), iterations: savedSession.iterations };
+    data = withDefaultProviders(JSON.parse(decoder.decode(plain)));
     return true;
   } catch {
     sessionStorage.removeItem(SESSION_KEY);
@@ -184,7 +229,9 @@ export function lockVault() {
   sessionStorage.removeItem(SESSION_KEY);
 }
 
-export function forgetVault() {
-  localStorage.removeItem(STORAGE_KEY);
+export async function forgetVault() {
+  await deleteRecord(RECORD_NAME);
+  stored = null;
+  storeReady = Promise.resolve();
   lockVault();
 }

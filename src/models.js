@@ -4,6 +4,12 @@ const CUSTOM = "__custom__";
 
 // Modell-IDs im Namensformat des jeweiligen Anbieters; eigene IDs gehen über „Anderes Modell …“.
 export const MODEL_CATALOG = {
+  perplexity: [
+    "sonar",
+    "sonar-pro",
+    "sonar-reasoning-pro",
+    "sonar-deep-research",
+  ],
   openai: [
     "gpt-6-astra",
     "gpt-6.1-sol",

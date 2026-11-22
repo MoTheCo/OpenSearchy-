@@ -1,8 +1,15 @@
+function chatEndpoint(baseUrl) {
+  if (/^https:\/\/api\.perplexity\.ai\/?$/.test(baseUrl ?? "")) {
+    return "/api/perplexity/chat/completions";
+  }
+  return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+}
+
 // Vollständige Antwort ohne Streaming; nötig, wenn das LLM ein JSON-Signal liefert.
 export async function completeChat({ baseUrl, apiKey, model, messages, temperature, maxTokens }) {
   let response;
   try {
-    response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+    response = await fetch(chatEndpoint(baseUrl), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -27,7 +34,7 @@ export async function completeChat({ baseUrl, apiKey, model, messages, temperatu
 export async function streamChat({ baseUrl, apiKey, model, messages, temperature, maxTokens, onToken }) {
   let response;
   try {
-    response = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+    response = await fetch(chatEndpoint(baseUrl), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

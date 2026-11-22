@@ -1,246 +1,338 @@
-const WIKI_API = "https://de.wikipedia.org/w/api.php";
+// Web- und Bildsuche mit Perplexity Sonar, direkt oder über OpenRouter.
+const SEARCH_MAX_TOKENS = 1200;
 const SOURCE_COUNT = 6;
-const SEARCH_LIMIT = 5;
-const MAX_TERMS = 6;
-const CONTEXT_CHARS = 12000;
-const CHUNK_CHARS = 700;
-const CHUNKS_PER_SOURCE = 4;
-const MIN_PARAGRAPH_CHARS = 40;
-const LEAD_BONUS = 1;
-const STOPWORDS = new Set([
-  "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem", "eines",
-  "und", "oder", "aber", "ist", "sind", "war", "waren", "wird", "werden", "wurde", "wurden",
-  "hat", "haben", "hatte", "hatten", "bin", "bist", "sein", "seine", "seiner", "seinem", "seinen",
-  "ihr", "ihre", "ihrer", "ihren", "ihm", "ihn", "was", "wie", "wer", "wen", "wem", "wo",
-  "wann", "warum", "wieso", "weshalb", "welche", "welcher", "welches", "welchen", "welchem",
-  "von", "zu", "im", "in", "am", "auf", "mit", "für", "über", "bei", "nach", "aus", "an",
-  "es", "sich", "auch", "nicht", "gibt", "kann", "können", "alt", "viel", "viele", "dass",
-  "dies", "diese", "dieser", "dieses", "er", "sie", "wir", "ich", "du", "man", "mehr", "noch",
-  "schon", "sehr", "nur", "also", "dazu", "da", "durch", "gegen", "ohne", "unter", "zwischen",
-  "bis", "um", "als", "wenn", "stellt", "stellen", "her", "heißt", "heisst", "gab", "gibt",
-]);
+const DESCRIPTION_MAX_CHARS = 320;
+const TITLE_MAX_CHARS = 160;
+const IMAGE_COUNT = 12;
+const SEARCH_SYSTEM = [
+  "Führe eine präzise Websuche aus. Verwende nur Quellen, die die Suchanfrage direkt beantworten oder direkt mit ihr zusammenhängen.",
+  "Behandle die Anfrage wie eine Suchmaschine: Suche die Begriffe wörtlich und liefere Seiten, die genau diese Begriffe behandeln. Steht die Anfrage für ein Unternehmen oder eine Marke mit eigener Website, muss deren offizielle Website (z. B. google.com für „google“) das erste Ergebnis sein. Bei mehrdeutigen Begriffen liefere nicht nur Seiten eines einzigen Anbieters, sondern eine Mischung aus offizieller Seite und unabhängigen Seiten zum Begriff.",  `Ermittle bis zu ${SOURCE_COUNT} inhaltlich unterschiedliche, möglichst verlässliche Ergebnisse. Vermeide doppelte Seiten und breit verwandte Themen.`,  "Gib ausschließlich gültiges JSON zurück: {\"results\":[{\"title\":\"exakter Seitentitel\",\"url\":\"https://...\",\"description\":\"kurze deutsche Beschreibung\"}]}",
+  "Die Beschreibung muss in ein bis zwei Sätzen konkret erklären, warum genau dieses Ergebnis zur Suchanfrage passt. Keine allgemeine Zusammenfassung der ganzen Suche.",
+].join("\n");
 
-function tokens(text) {
-  return text.match(/[\p{L}\p{N}]+/gu) ?? [];
+
+// Bevorzugt Perplexity direkt; nutzt andernfalls den vorhandenen OpenRouter-Key.
+export function pickPerplexity(providers) {
+  const keyed = providers.filter((provider) => provider.apiKey);
+  return keyed.find((provider) =>
+    provider.id === "perplexity"
+    || /api\.perplexity\.ai/.test(provider.baseUrl ?? "")
+  ) ?? keyed.find((provider) =>
+    provider.id === "openrouter"
+    || /openrouter\.ai/.test(provider.baseUrl ?? "")
+  ) ?? null;
 }
 
-// Suchbegriffe ohne Fragewörter; Duplikate entfallen.
-function contentTerms(question) {
-  const terms = [];
-  for (const token of tokens(question)) {
-    const word = token.toLowerCase();
-    if (word.length < 3 || STOPWORDS.has(word) || terms.includes(word)) continue;
-    terms.push(word);
+export function pickBrave(providers) {
+  return providers.find((provider) =>
+    provider.apiKey && (
+      provider.id === "brave-search"
+      || /api\.search\.brave\.com/.test(provider.baseUrl ?? "")
+    )
+  ) ?? null;
+}
+
+function isDirectPerplexity(baseUrl) {
+  return /^https:\/\/api\.perplexity\.ai\/?$/.test(baseUrl ?? "");
+}
+
+function searchModel(baseUrl) {
+  return isDirectPerplexity(baseUrl) ? "sonar" : "perplexity/sonar";
+}
+
+function validUrl(value) {
+  try {
+    const url = new URL(value);
+    return /^https?:$/.test(url.protocol) ? url : null;
+  } catch {
+    return null;
   }
-  return terms;
 }
 
-// Zusammenhängende großgeschriebene Wörter wie "Albert Einstein" oder "Siemens".
-function entityPhrases(question) {
-  const phrases = [];
-  let current = [];
-  for (const token of tokens(question)) {
-    const capitalized = /^\p{Lu}/u.test(token) && !STOPWORDS.has(token.toLowerCase());
-    if (capitalized) {
-      current.push(token);
-      continue;
-    }
-    if (current.length) phrases.push(current.join(" "));
-    current = [];
+function resultKey(value) {
+  const url = validUrl(value);
+  if (!url) return "";
+  url.hash = "";
+  url.search = "";
+  return `${url.hostname.replace(/^www\./, "")}${url.pathname.replace(/\/$/, "")}`.toLowerCase();
+}
+
+// Bei einem einzelnen Begriff wie „google“ steht die Seite <begriff>.com (google.com) immer ganz oben.
+function promoteOfficialSite(query, citations) {
+  const term = query.trim().toLowerCase();
+  if (!/^[a-z0-9-]+$/.test(term)) return citations;
+  const official = `${term}.com`;
+  const isOfficial = (citation) => validUrl(citation.url)?.hostname.replace(/^www\./, "") === official;
+  return [...citations.filter(isOfficial), ...citations.filter((citation) => !isOfficial(citation))];
+}
+
+function cleanText(value, maxLength = DESCRIPTION_MAX_CHARS) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  const shortened = text.slice(0, maxLength - 1);
+  const boundary = shortened.lastIndexOf(" ");
+  return `${shortened.slice(0, boundary > maxLength * 0.7 ? boundary : shortened.length).trimEnd()}…`;
+}
+
+// Die strukturierte Antwort des Modells ist die maßgebliche Trefferliste mit Titel und Beschreibung.
+function parseStructuredResults(content) {
+  if (typeof content !== "string") return [];
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+  if (start < 0 || end <= start) return [];
+  try {
+    const parsed = JSON.parse(content.slice(start, end + 1));
+    const entries = Array.isArray(parsed) ? parsed : parsed.results;
+    if (!Array.isArray(entries)) return [];
+    return entries
+      .map((entry) => ({
+        title: cleanText(entry?.title, TITLE_MAX_CHARS),
+        url: validUrl(entry?.url)?.href ?? "",
+        description: cleanText(entry?.description),
+      }))
+      .filter((entry) => entry.url);
+  } catch {
+    return [];
   }
-  if (current.length) phrases.push(current.join(" "));
-  return [...new Set(phrases)];
 }
 
-function planSearches(question) {
-  const phrases = entityPhrases(question);
-  const terms = contentTerms(question).slice(0, MAX_TERMS);
-  const primary = phrases.map((term) => ({ term, weight: 3 }));
-  if (terms.length) primary.push({ term: terms.slice(0, 4).join(" "), weight: 2 });
-  if (primary.length === 0) primary.push({ term: question, weight: 1 });
-  const secondary = terms.map((term) => ({ term, weight: 1 }));
-  return { phrases, terms, primary, secondary };
-}
-
-// Begrenzt parallele Anfragen, damit Wikipedia keine 429-Fehler liefert.
-async function mapLimit(items, limit, fn) {
-  const results = [];
-  for (let i = 0; i < items.length; i += limit) {
-    results.push(...(await Promise.all(items.slice(i, i + limit).map(fn))));
+// Annotationen (url_citation) je Ergebnis-Schlüssel; dienen als Ersatz für fehlende Titel oder Beschreibungen.
+function annotationResults(annotations) {
+  const results = new Map();
+  for (const annotation of annotations) {
+    const citation = annotation?.url_citation;
+    const url = validUrl(citation?.url)?.href;
+    const key = resultKey(url);
+    if (annotation?.type !== "url_citation" || !key || results.has(key)) continue;
+    results.set(key, {
+      title: cleanText(citation.title, TITLE_MAX_CHARS),
+      url,
+      description: cleanText(citation.content),
+    });
   }
   return results;
 }
 
-// Wiederholt Anfragen bei 429 oder "too busy" mit wachsender Wartezeit.
-async function apiGet(params, attempt = 0) {
-  const query = new URLSearchParams({ format: "json", formatversion: "2", origin: "*", ...params });
-  const response = await fetch(`${WIKI_API}?${query}`);
-  const data = response.ok ? await response.json() : null;
-  const busy = response.status === 429 || data?.error?.code === "ratelimited" || /too busy/i.test(data?.error?.info ?? "");
-  if (busy && attempt < 3) {
-    await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
-    return apiGet(params, attempt + 1);
-  }
-  if (!response.ok) throw new Error(`Wikipedia HTTP ${response.status}`);
-  if (data.error) throw new Error(data.error.info);
-  return data;
-}
-
-async function searchTitles(term) {
-  const data = await apiGet({
-    action: "query",
-    list: "search",
-    srsearch: term,
-    srnamespace: "0",
-    srlimit: String(SEARCH_LIMIT),
-  });
-  return (data.query?.search ?? []).map((hit) => hit.title);
-}
-
-// Exakte Titel (ohne Weiterleitung) gelten als sehr starker Treffer.
-async function exactTitles(phrases) {
-  if (phrases.length === 0) return [];
-  const data = await apiGet({ action: "query", titles: phrases.join("|") });
-  return (data.query?.pages ?? []).filter((page) => !page.missing).map((page) => page.title);
-}
-
-// Vollständiger Artikeltext; Begriffsklärungsseiten werden übersprungen.
-async function fetchArticle(title) {
-  const data = await apiGet({
-    action: "query",
-    titles: title,
-    redirects: "1",
-    prop: "extracts|pageprops|info",
-    explaintext: "1",
-    exsectionformat: "plain",
-    inprop: "url",
-  });
-  const page = data.query?.pages?.[0];
-  if (!page || page.missing || "disambiguation" in (page.pageprops ?? {})) return null;
-  return { title: page.title, url: page.fullurl ?? null, text: page.extract ?? "" };
-}
-
-// Zerlegt den Text in Abschnitte mit Überschrift; Überschriften sind kurze Zeilen ohne Satzzeichen am Ende.
-function chunkArticle(text) {
-  const chunks = [];
-  let section = "";
-  let buffer = [];
-  let size = 0;
-  const flush = () => {
-    if (buffer.length === 0) return;
-    chunks.push({ section, text: buffer.join("\n") });
-    buffer = [];
-    size = 0;
-  };
-  for (const raw of text.split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
-    if (line.length < 80 && !/[.!?:;)"»]$/.test(line)) {
-      flush();
-      section = line;
-      continue;
-    }
-    if (line.length < MIN_PARAGRAPH_CHARS) continue;
-    buffer.push(line);
-    size += line.length;
-    if (size >= CHUNK_CHARS) flush();
-  }
-  flush();
-  return chunks;
-}
-
-function scoreChunk(text, phrases, stems) {
-  const lower = text.toLowerCase();
-  const stemHits = stems.filter((stem) => lower.includes(stem)).length;
-  const phraseHits = phrases.filter((phrase) => lower.includes(phrase)).length;
-  return stemHits + 2 * phraseHits;
-}
-
-// Einleitung jedes Artikels immer dabei; danach die besten Abschnitte im Zeichenbudget.
-function selectPassages(articles, phrases, stems) {
-  const leads = [];
-  const others = [];
-  articles.forEach((article, source) => {
-    chunkArticle(article.text).forEach((chunk, order) => {
-      const entry = {
-        source,
-        order,
-        section: chunk.section,
-        text: chunk.text,
-        score: scoreChunk(chunk.text, phrases, stems) + (order === 0 ? LEAD_BONUS : 0),
-      };
-      if (order === 0) leads.push(entry);
-      else if (entry.score > 0) others.push(entry);
+function mergeCitations(annotations, content) {
+  const fromAnnotations = annotationResults(annotations);
+  const structured = parseStructuredResults(content);
+  const entries = structured.length ? structured : [...fromAnnotations.values()];
+  const seen = new Set();
+  const citations = [];
+  for (const entry of entries) {
+    const key = resultKey(entry.url);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const fallback = fromAnnotations.get(key);
+    citations.push({
+      title: entry.title || fallback?.title || entry.url,
+      url: entry.url,
+      content: entry.description || fallback?.description || "",
     });
-  });
-
-  let budget = CONTEXT_CHARS;
-  const selected = [];
-  const take = (entry) => {
-    if (entry.text.length > budget) return false;
-    budget -= entry.text.length;
-    selected.push(entry);
-    return true;
-  };
-  leads.forEach(take);
-
-  others.sort((a, b) => b.score - a.score || a.source - b.source || a.order - b.order);
-  const perSource = new Map();
-  for (const entry of others) {
-    const count = perSource.get(entry.source) ?? 0;
-    if (count >= CHUNKS_PER_SOURCE) continue;
-    if (take(entry)) perSource.set(entry.source, count + 1);
+    if (citations.length >= SOURCE_COUNT) break;
   }
-  return selected.sort((a, b) => a.source - b.source || a.order - b.order);
+  return citations;
 }
 
-export async function retrieveSources(question) {
-  const { phrases, terms, primary, secondary } = planSearches(question);
-  const scores = new Map();
-  const add = (title, points) => scores.set(title, (scores.get(title) ?? 0) + points);
-  const addLists = (lists) => {
-    for (const { titles, weight } of lists) {
-      titles.forEach((title, rank) => add(title, weight * (SEARCH_LIMIT - rank)));
+// Liefert eindeutige, präzise Web-Treffer mit kurzen Beschreibungen.
+export async function searchWeb({ baseUrl, apiKey, query }) {
+  let response;
+  try {
+    response = await fetch(perplexityEndpoint(baseUrl), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: searchModel(baseUrl),
+        messages: [
+          { role: "system", content: SEARCH_SYSTEM },
+          { role: "user", content: query },
+        ],
+        max_tokens: SEARCH_MAX_TOKENS,
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            name: "web_results",
+            schema: {
+              type: "object",
+              properties: {
+                results: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      title: { type: "string" },
+                      url: { type: "string" },
+                      description: { type: "string" },
+                    },
+                    required: ["title", "url", "description"],
+                    additionalProperties: false,
+                  },
+                },
+              },
+              required: ["results"],
+              additionalProperties: false,
+            },
+          },
+        },
+        temperature: 0,
+        stream: false,
+      }),
+    });
+  } catch {
+    throw new Error("Perplexity ist nicht erreichbar.");
+  }
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    throw new Error(`Perplexity antwortet mit HTTP ${response.status}: ${detail}`);
+  }
+
+  const data = await response.json();
+  const message = data.choices?.[0]?.message ?? {};
+  const answer = message.content ?? "";
+  return { answer, citations: promoteOfficialSite(query, mergeCitations(message.annotations ?? [], answer)) };
+}
+
+function perplexityEndpoint(baseUrl) {
+  if (isDirectPerplexity(baseUrl)) {
+    return "/api/perplexity/chat/completions";
+  }
+  return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+}
+
+function imageHit(imageUrl, pageUrl, title, query) {
+  const image = validUrl(imageUrl)?.href;
+  const page = validUrl(pageUrl)?.href ?? image;
+  if (!image || !page) return null;
+  return {
+    title: cleanText(title, TITLE_MAX_CHARS) || query,
+    pageUrl: page,
+    imageUrl: image,
+  };
+}
+
+function parseBraveImages(data, query) {
+  return (data.results ?? [])
+    .map((item) => imageHit(
+      item.properties?.url ?? item.thumbnail?.src,
+      item.url ?? item.properties?.url,
+      item.title,
+      query
+    ))
+    .filter(Boolean);
+}
+
+function parseOpenverseImages(data, query) {
+  return (data.results ?? [])
+    .map((item) => imageHit(
+      item.thumbnail ?? item.url,
+      item.foreign_landing_url,
+      item.title,
+      query
+    ))
+    .filter(Boolean);
+}
+
+function parseWikimediaImages(data, query) {
+  return (data.query?.pages ?? [])
+    .map((page) => {
+      const info = page.imageinfo?.[0] ?? {};
+      return imageHit(
+        info.thumburl ?? info.url,
+        info.descriptionurl ?? info.url,
+        page.title?.replace(/^File:/, ""),
+        query
+      );
+    })
+    .filter(Boolean);
+}
+
+async function fetchImageProvider(endpoint, name, query, headers = {}) {
+  let response;
+  try {
+    response = await fetch(`${endpoint}?q=${encodeURIComponent(query)}`, { headers });
+  } catch {
+    throw new Error(`${name} ist nicht erreichbar.`);
+  }
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 200);
+    throw new Error(`${name} antwortet mit HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+  return response.json();
+}
+
+export async function searchImages({ braveApiKey = "", query }) {
+  const seen = new Set();
+  const images = [];
+  const providers = [];
+  const failures = [];
+  const append = (entries, provider) => {
+    for (const entry of entries) {
+      const key = resultKey(entry.imageUrl);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      images.push(entry);
+      if (images.length >= IMAGE_COUNT) break;
     }
+    if (images.some((entry) => entries.includes(entry))) providers.push(provider);
   };
 
-  const runSearch = async ({ term, weight }) => ({ titles: await searchTitles(term), weight });
-  addLists(await mapLimit(primary, 2, runSearch));
-  for (const title of await exactTitles(phrases)) add(title, 100);
-  if (scores.size < SOURCE_COUNT + 4) addLists(await mapLimit(secondary, 2, runSearch));
+  const searches = [];
+  if (braveApiKey) {
+    searches.push({
+      name: "Brave",
+      run: () => fetchImageProvider(
+        "/api/images/brave",
+        "Brave",
+        query,
+        { Authorization: `Bearer ${braveApiKey}` }
+      ),
+      parse: parseBraveImages,
+    });
+  }
+  searches.push(
+    {
+      name: "Openverse",
+      run: () => fetchImageProvider("/api/images/openverse", "Openverse", query),
+      parse: parseOpenverseImages,
+    },
+    {
+      name: "Wikimedia Commons",
+      run: () => fetchImageProvider("/api/images/wikimedia", "Wikimedia Commons", query),
+      parse: parseWikimediaImages,
+    }
+  );
 
-  const stems = terms.map((term) => term.slice(0, 5));
-  for (const title of [...scores.keys()]) {
-    const lower = title.toLowerCase();
-    if (stems.some((stem) => lower.includes(stem))) add(title, 25);
+  for (const search of searches) {
+    if (images.length >= IMAGE_COUNT) break;
+    try {
+      const parsed = search.parse(await search.run(), query);
+      append(parsed, search.name);
+    } catch (err) {
+      failures.push(err.message);
+      console.warn(`Bildanbieter ${search.name} fehlgeschlagen:`, err);
+    }
   }
 
-  const ranked = [...scores]
-    .sort((a, b) => b[1] - a[1])
-    .map(([title]) => title)
-    .slice(0, SOURCE_COUNT + 4);
-  const articles = (await mapLimit(ranked, 2, fetchArticle))
-    .filter(Boolean)
-    .slice(0, SOURCE_COUNT);
-  if (articles.length === 0) return { sources: [], context: "" };
-
-  const selected = selectPassages(articles, phrases.map((phrase) => phrase.toLowerCase()), stems);
-  const sources = articles.map((article) => ({ title: article.title, url: article.url, passages: [] }));
-  for (const entry of selected) {
-    sources[entry.source].passages.push({ section: entry.section, text: entry.text });
+  if (!images.length) {
+    throw new Error(failures.length ? failures.join(" ") : "Keine Bildanbieter sind verfügbar.");
   }
+  if (failures.length) console.warn("Bildersuche nutzte Fallbacks:", failures);
+  return { images, providers };
+}
 
-  const usable = sources
-    .filter((source) => source.passages.length > 0)
-    .map((source, index) => ({ ...source, n: index + 1 }));
-  const context = usable
-    .map((source) => {
-      const passages = source.passages
-        .map((passage) => (passage.section ? `${passage.section}: ${passage.text}` : passage.text))
-        .join("\n\n");
-      return `[${source.n}] ${source.title}\n${passages}`;
-    })
+// Quellen für den Chat: jeder Web-Treffer ist eine nummerierte Quelle mit seinem Ausschnitt.
+export async function retrieveSources(question, provider) {
+  if (!provider?.apiKey) throw new Error("Kein API-Key für Perplexity oder OpenRouter.");
+  const { citations } = await searchWeb({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, query: question });
+  const sources = citations.slice(0, SOURCE_COUNT).map((citation, index) => ({
+    n: index + 1,
+    title: citation.title,
+    url: citation.url,
+    passages: citation.content ? [{ section: "", text: citation.content }] : [],
+  }));
+  const context = sources
+    .map((source) => `[${source.n}] ${source.title}\n${source.passages.map((passage) => passage.text).join("\n")}`)
     .join("\n\n");
-  return { sources: usable, context };
+  return { sources, context };
 }
 
