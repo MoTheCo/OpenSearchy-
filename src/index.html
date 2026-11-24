@@ -4,24 +4,29 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>OpenSearchy</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <div class="app-container">
     <header>
-      <h1>OpenSearchy</h1>
-      <button id="settings-btn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙</button>
+      <h1><span class="brand-mark" aria-hidden="true">O</span><span>Open<span class="brand-accent">Searchy</span></span></h1>
+      <button id="settings-btn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.42 2.46a1.7 1.7 0 0 0-1.9-.78 1.7 1.7 0 0 0-1.03 1.6h-2.9a1.7 1.7 0 0 0-1.03-1.6 1.7 1.7 0 0 0-1.9.78l-1.42-2.46.06-.06A1.7 1.7 0 0 0 8.6 15a1.7 1.7 0 0 0-1.47-.85H7V11.3h.13A1.7 1.7 0 0 0 8.6 10a1.7 1.7 0 0 0-.34-1.88l-.06-.06L9.62 5.6a1.7 1.7 0 0 0 1.9.78 1.7 1.7 0 0 0 1.03-1.6h2.9a1.7 1.7 0 0 0 1.03 1.6 1.7 1.7 0 0 0 1.9-.78l1.42 2.46-.06.06A1.7 1.7 0 0 0 19.4 10a1.7 1.7 0 0 0 1.47 1.3H21v2.85h-.13A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+      </button>
     </header>
     <div class="main-content">
       <section class="search-panel">
         <form role="search" action="/" method="get" id="search-form">
-          <input type="search" name="q" placeholder="Web durchsuchen …" autocomplete="off" required>
-          <button type="submit">Suchen</button>
+          <svg class="search-leading-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></svg>
+          <input type="search" name="q" placeholder="Alles durchsuchen …" autocomplete="off" required>
+          <button type="submit" aria-label="Suche starten"><span>Suchen</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 4 8 8-8 8"/></svg></button>
         </form>
         <nav class="tabs" aria-label="Ansicht">
-          <button type="button" class="tab-btn active" data-view="search" aria-pressed="true">Suche</button>
+          <button type="button" class="tab-btn active" data-view="search" aria-pressed="true">Internet</button>
           <button type="button" class="tab-btn" data-view="chat" aria-pressed="false">Chat</button>
           <button type="button" class="tab-btn" data-view="images" aria-pressed="false">Bilder</button>
+          <button type="button" class="tab-btn" data-view="map" aria-pressed="false">Karte</button>
         </nav>
         <div id="view-search">
           <p id="status"></p>
@@ -55,6 +60,14 @@
       <section class="images-panel" id="images-panel" hidden>
         <p class="images-status" id="images-status"></p>
         <div class="image-results" id="image-results"></div>
+      </section>
+      <section class="map-panel" id="map-panel" hidden>
+        <p class="map-status" id="map-status"></p>
+        <div class="map-layout">
+          <div class="map-canvas" id="map-canvas" aria-label="OpenStreetMap-Karte"></div>
+          <ol class="map-results" id="map-results"></ol>
+        </div>
+        <p class="map-attribution">Kartenmaterial © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap-Mitwirkende</a></p>
       </section>
       <span id="sources-count" hidden></span>
       <aside class="sources-panel" id="sources-panel" hidden></aside>
@@ -154,6 +167,7 @@
       </form>
     </div>
   </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

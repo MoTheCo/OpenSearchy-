@@ -4,6 +4,7 @@ const panels = {
   search: document.getElementById("view-search"),
   chat: document.getElementById("chat-workspace"),
   images: document.getElementById("images-panel"),
+  map: document.getElementById("map-panel"),
 };
 const links = [...document.querySelectorAll("[data-view]")];
 const VIEW_KEY = "opensearchy.view";
@@ -30,7 +31,7 @@ export async function showView(name) {
   currentView = name;
   sessionStorage.setItem(VIEW_KEY, name);
   document.body.classList.toggle("chat-view", name === "chat");
-  document.body.classList.toggle("search-home", name === "search" || name === "images");
+  document.body.classList.toggle("search-home", ["search", "images", "map"].includes(name));
   for (const [key, panel] of Object.entries(panels)) {
     panel.hidden = key !== name;
   }

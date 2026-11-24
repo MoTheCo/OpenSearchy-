@@ -2,11 +2,10 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
+    routing::get,
+    Router,
 };
 use serde::Deserialize;
-use serde_json::Value;
 use std::path::PathBuf;
 
 const INDEX: &str = include_str!("index.html");
@@ -33,10 +32,12 @@ async fn main() {
         .route("/app.js", get(app_js))
         .route("/style.css", get(style))
         .route("/js/{name}", get(module))
-        .route("/api/perplexity/chat/completions", post(perplexity_chat))
+        .route("/api/search/brave", get(brave_search))
         .route("/api/images/brave", get(brave_images))
         .route("/api/images/openverse", get(openverse_images))
         .route("/api/images/wikimedia", get(wikimedia_images))
+        .route("/api/maps/search", get(map_search))
+        .route("/api/maps/nearby", get(map_nearby))
         .route(
             "/api/store/{name}",
             get(read_record).put(write_record).delete(delete_record),
@@ -118,6 +119,26 @@ async fn brave_images(headers: HeaderMap, Query(query): Query<ImageQuery>) -> Re
     image_proxy(url, Some(api_key), "Brave").await
 }
 
+async fn brave_search(headers: HeaderMap, Query(query): Query<ImageQuery>) -> Response {
+    let Some(api_key) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let url = reqwest::Url::parse("https://api.search.brave.com/res/v1/web/search")
+        .expect("Brave-URL ist ungültig")
+        .query_pairs_mut()
+        .append_pair("q", query.q.trim())
+        .append_pair("count", "6")
+        .append_pair("safesearch", "moderate")
+        .finish()
+        .to_string();
+    image_proxy(url, Some(api_key), "Brave Search").await
+}
+
 async fn openverse_images(Query(query): Query<ImageQuery>) -> Response {
     let url = reqwest::Url::parse("https://api.openverse.org/v1/images/")
         .expect("Openverse-URL ist ungültig")
@@ -148,49 +169,167 @@ async fn wikimedia_images(Query(query): Query<ImageQuery>) -> Response {
     image_proxy(url, None, "Wikimedia Commons").await
 }
 
-async fn perplexity_chat(headers: HeaderMap, Json(body): Json<Value>) -> Response {
-    let Some(api_key) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-
-    let result = reqwest::Client::new()
-        .post("https://api.perplexity.ai/chat/completions")
-        .bearer_auth(api_key)
-        .json(&body)
+async fn map_search(Query(query): Query<ImageQuery>) -> Response {
+    let url = reqwest::Url::parse("https://nominatim.openstreetmap.org/search")
+        .expect("Nominatim-URL ist ungültig")
+        .query_pairs_mut()
+        .append_pair("q", query.q.trim())
+        .append_pair("format", "jsonv2")
+        .append_pair("addressdetails", "1")
+        .append_pair("limit", "6")
+        .finish()
+        .to_string();
+    let client = reqwest::Client::builder()
+        .user_agent("OpenSearchy/0.1 (local search application)")
+        .build()
+        .expect("HTTP-Client konnte nicht erstellt werden");
+    let upstream = match client
+        .get(url)
+        .header(header::ACCEPT, "application/json")
         .send()
-        .await;
-
-    let upstream = match result {
+        .await
+    {
         Ok(response) => response,
         Err(err) => {
-            eprintln!("Perplexity-Anfrage fehlgeschlagen: {err}");
-            return (StatusCode::BAD_GATEWAY, "Perplexity ist nicht erreichbar.").into_response();
+            eprintln!("Karten-Suche fehlgeschlagen: {err}");
+            return (
+                StatusCode::BAD_GATEWAY,
+                "OpenStreetMap ist nicht erreichbar.",
+            )
+                .into_response();
         }
     };
     let status = upstream.status();
-    let content_type = upstream
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/json")
-        .to_owned();
     let bytes = match upstream.bytes().await {
         Ok(bytes) => bytes,
         Err(err) => {
-            eprintln!("Perplexity-Antwort konnte nicht gelesen werden: {err}");
+            eprintln!("Karten-Antwort konnte nicht gelesen werden: {err}");
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
-
     (
         StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-        [(header::CONTENT_TYPE, content_type)],
+        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
         bytes,
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct NearbyQuery {
+    category: String,
+    term: Option<String>,
+    south: f64,
+    west: f64,
+    north: f64,
+    east: f64,
+}
+
+async fn map_nearby(Query(query): Query<NearbyQuery>) -> Response {
+    let tags: &[(&str, &str)] = match query.category.as_str() {
+        "doctors" => &[
+            ("amenity", "doctors"),
+            ("amenity", "clinic"),
+            ("healthcare", "doctor"),
+        ],
+        "dentist" => &[("amenity", "dentist"), ("healthcare", "dentist")],
+        "hospital" => &[("amenity", "hospital"), ("healthcare", "hospital")],
+        "pharmacy" => &[("amenity", "pharmacy"), ("healthcare", "pharmacy")],
+        "physician" => &[("amenity", "doctors"), ("healthcare", "physiotherapist")],
+        "named" => &[],
+        _ => return (StatusCode::BAD_REQUEST, "Unbekannte Kartenkategorie.").into_response(),
+    };
+    if ![query.south, query.west, query.north, query.east]
+        .iter()
+        .all(|value| value.is_finite())
+        || query.south < -90.0
+        || query.north > 90.0
+        || query.west < -180.0
+        || query.east > 180.0
+        || query.south >= query.north
+        || query.west >= query.east
+        || (query.north - query.south) * (query.east - query.west) > 4.0
+    {
+        return (StatusCode::BAD_REQUEST, "Ungültiger Suchbereich.").into_response();
+    }
+    let bbox = format!(
+        "{},{},{},{}",
+        query.south, query.west, query.north, query.east
+    );
+    let filters = if query.category == "named" {
+        let Some(term) = query
+            .term
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return (StatusCode::BAD_REQUEST, "Ein Name ist erforderlich.").into_response();
+        };
+        let escaped = term.chars().fold(String::new(), |mut result, character| {
+            if "\\.^$|?*+()[]{}".contains(character) {
+                result.push('\\');
+            }
+            if character == '"' {
+                result.push('\\');
+            }
+            result.push(character);
+            result
+        });
+        format!(
+            "nwr[\"name\"~\"{escaped}\",i]({bbox});nwr[\"operator\"~\"{escaped}\",i]({bbox});nwr[\"healthcare:speciality\"~\"{escaped}\",i]({bbox});"
+        )
+    } else {
+        tags.iter()
+            .map(|(key, value)| format!("nwr[\"{key}\"=\"{value}\"]({bbox});"))
+            .collect::<String>()
+    };
+    let overpass_query = format!("[out:json][timeout:25];({filters});out center 60;");
+    let client = reqwest::Client::builder()
+        .user_agent("OpenSearchy/0.1 (local search application)")
+        .build()
+        .expect("HTTP-Client konnte nicht erstellt werden");
+    let endpoints = [
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+    ];
+    for endpoint in endpoints {
+        let upstream = match client
+            .post(endpoint)
+            .form(&[("data", &overpass_query)])
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_server_error() => {
+                eprintln!(
+                    "Overpass-Instanz {endpoint} antwortet mit {}",
+                    response.status()
+                );
+                continue;
+            }
+            Ok(response) => response,
+            Err(err) => {
+                eprintln!("Overpass-Instanz {endpoint} fehlgeschlagen: {err}");
+                continue;
+            }
+        };
+        let status = upstream.status();
+        let bytes = match upstream.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                eprintln!("Overpass-Antwort von {endpoint} konnte nicht gelesen werden: {err}");
+                continue;
+            }
+        };
+        return (
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+            bytes,
+        )
+            .into_response();
+    }
+    (
+        StatusCode::BAD_GATEWAY,
+        "OpenStreetMap-Detailsuche ist derzeit nicht erreichbar.",
     )
         .into_response()
 }

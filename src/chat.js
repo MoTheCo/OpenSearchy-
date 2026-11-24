@@ -1,7 +1,7 @@
 import { el } from "/js/dom.js";
-import { completeChat } from "/js/llm.js";
+import { streamChat } from "/js/llm.js";
 import { loadModels } from "/js/models.js";
-import { pickPerplexity, retrieveSources } from "/js/rag.js";
+import { pickOpenRouter, retrieveSources } from "/js/rag.js";
 import { confirmDialog, openNewAgent, requireVault } from "/js/settings.js";
 import { isUnlocked, saveVault, vaultData } from "/js/vault.js";
 
@@ -21,6 +21,7 @@ const CONFIDENCE_THRESHOLD = 0.45;
 const DIRECT_TEMPERATURE = 0.7;
 const DIRECT_MAX_TOKENS = 4000;
 const HISTORY_MESSAGES = 20;
+const STREAM_CHARACTER_DELAY = 12;
 
 const sourcesPanel = document.getElementById("sources-panel");
 const sourcesCount = document.getElementById("sources-count");
@@ -570,20 +571,20 @@ async function onSubmit(event) {
   renderChatHistory();
   saveChat();
   const bubble = appendMessage("assistant", "Antwort wird aus eigenem Wissen erstellt …");
+  bubble.setAttribute("aria-live", "polite");
 
   const base = { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, temperature: config.temperature, maxTokens: config.maxTokens };
   const wantsSources = SOURCE_TRIGGER.test(question);
   try {
-    const draft = parseReply(
-      await completeChat({
-        ...base,
-        messages: [
-          { role: "system", content: `${config.systemPrompt}\n\n${DRAFT_INSTRUCTIONS}${wantsSources ? `\n\n${KEYWORD_INSTRUCTIONS}` : ""}` },
-          ...history.slice(-HISTORY_MESSAGES),
-          { role: "user", content: question },
-        ],
-      })
-    );
+    const draft = await streamReply({
+      ...base,
+      messages: [
+        { role: "system", content: `${config.systemPrompt}\n\n${DRAFT_INSTRUCTIONS}${wantsSources ? `\n\n${KEYWORD_INSTRUCTIONS}` : ""}` },
+        ...history.slice(-HISTORY_MESSAGES),
+        { role: "user", content: question },
+      ],
+      bubble,
+    });
     let answer = draft.answer || "";
 
     if (!wantsSources && normalizeConfidence(draft.confidence) >= CONFIDENCE_THRESHOLD) {
@@ -596,21 +597,20 @@ async function onSubmit(event) {
       let context = "";
       let notice = "";
       try {
-        ({ sources, context } = await retrieveSources(query, pickPerplexity(vaultData().providers)));
+        ({ sources, context } = await retrieveSources(query, pickOpenRouter(vaultData().providers)));
       } catch (err) {
         notice = `Quellensuche fehlgeschlagen (${err.message}).`;
       }
       if (context) {
         bubble.textContent = "Entwurf wird mit Quellen geprüft …";
-        const check = parseReply(
-          await completeChat({
-            ...base,
-            messages: [
-              { role: "system", content: `${config.systemPrompt}\n\n${CHECK_INSTRUCTIONS}\n\nQuellenauszüge:\n\n${context}` },
-              { role: "user", content: `Frage: ${question}\n\nEntwurf: ${answer}` },
-            ],
-          })
-        );
+        const check = await streamReply({
+          ...base,
+          messages: [
+            { role: "system", content: `${config.systemPrompt}\n\n${CHECK_INSTRUCTIONS}\n\nQuellenauszüge:\n\n${context}` },
+            { role: "user", content: `Frage: ${question}\n\nEntwurf: ${answer}` },
+          ],
+          bubble,
+        });
         answer = check.answer || answer;
         // Quellen erscheinen bei Signal des LLMs oder wenn der Nutzer sie ausdrücklich verlangt.
         const used = Array.isArray(check.sources) ? check.sources.map(String) : [];
@@ -637,6 +637,83 @@ async function onSubmit(event) {
     busy = false;
     updateSubmit();
   }
+}
+
+async function streamReply({ bubble, messages, ...config }) {
+  let raw = "";
+  let displayed = "";
+  let started = false;
+  let queue = Promise.resolve();
+  bubble.classList.add("streaming");
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  try {
+    await streamChat({
+      ...config,
+      messages,
+      onToken(token) {
+        raw += token;
+        const answer = streamedAnswer(raw);
+        if (answer.length > displayed.length) {
+          const added = answer.slice(displayed.length);
+          displayed = answer;
+          if (!started) {
+            started = true;
+            bubble.textContent = "";
+          }
+          queue = queue.then(() => revealStreamText(bubble, added));
+        }
+      },
+    });
+    await queue;
+  } finally {
+    bubble.classList.remove("streaming");
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  return parseReply(raw);
+}
+
+async function revealStreamText(bubble, added) {
+  const frameSize = 2;
+  let remaining = added;
+  while (remaining) {
+    const next = remaining.slice(0, frameSize);
+    remaining = remaining.slice(frameSize);
+    bubble.textContent += next;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    await delay(STREAM_CHARACTER_DELAY);
+  }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+// Liest einen noch nicht abgeschlossenen JSON-String aus dem Feld "answer".
+function streamedAnswer(text) {
+  const match = text.match(/"answer"\s*:\s*"((?:\\.|[^"\\])*)/);
+  if (!match) return "";
+  const encoded = match[1];
+  let decoded = "";
+  for (let index = 0; index < encoded.length; index += 1) {
+    if (encoded[index] !== "\\") {
+      decoded += encoded[index];
+      continue;
+    }
+    const escape = encoded[++index];
+    if (escape === undefined) break;
+    const simple = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f", '"': '"', "\\": "\\", "/": "/" };
+    if (escape in simple) {
+      decoded += simple[escape];
+    } else if (escape === "u") {
+      const hex = encoded.slice(index + 1, index + 5);
+      if (!/^[0-9a-f]{4}$/i.test(hex)) break;
+      decoded += String.fromCharCode(Number.parseInt(hex, 16));
+      index += 4;
+    } else {
+      decoded += escape;
+    }
+  }
+  return decoded;
 }
 
 // Das LLM antwortet mit JSON; ohne lesbares JSON gilt der Text als Antwort ohne Prüfsignal.
@@ -692,6 +769,7 @@ function renderAnswer(bubble, text, sources = currentSources) {
     }
     bubble.append(el("a", "cite", part, { href: source.url, target: "_blank", rel: "noopener noreferrer", title: source.title }));
   }
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 // Nur die Felder, die für die Zitat-Links nötig sind.

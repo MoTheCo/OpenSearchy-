@@ -7,7 +7,6 @@ const FORMAT = "opensearchy-vault";
 const VERSION = 1;
 const ITERATIONS = 600000;
 const DEFAULT_PROVIDERS = [
-  { id: "perplexity", name: "Perplexity", baseUrl: "https://api.perplexity.ai" },
   { id: "brave-search", name: "Brave Search", baseUrl: "https://api.search.brave.com/res/v1" },
   { id: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1" },
   { id: "mistral", name: "Mistral", baseUrl: "https://api.mistral.ai/v1" },
@@ -173,6 +172,7 @@ export async function unlockVault(password) {
 
 function withDefaultProviders(current) {
   const merged = { ...emptyData(), ...current };
+  merged.providers = merged.providers.filter((provider) => provider.id !== "perplexity");
   const existingIds = new Set(merged.providers.map((provider) => provider.id));
   for (const provider of DEFAULT_PROVIDERS) {
     if (!existingIds.has(provider.id)) merged.providers.unshift({ ...provider });

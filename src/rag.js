@@ -1,25 +1,23 @@
-// Web- und Bildsuche mit Perplexity Sonar, direkt oder über OpenRouter.
-const SEARCH_MAX_TOKENS = 1200;
+// Websuche über das in OpenRouter enthaltene Web-Search-Tool.
+const SEARCH_MAX_TOKENS = 500;
 const SOURCE_COUNT = 6;
-const DESCRIPTION_MAX_CHARS = 320;
+const DESCRIPTION_MAX_CHARS = 140;
 const TITLE_MAX_CHARS = 160;
 const IMAGE_COUNT = 12;
 const SEARCH_SYSTEM = [
   "Führe eine präzise Websuche aus. Verwende nur Quellen, die die Suchanfrage direkt beantworten oder direkt mit ihr zusammenhängen.",
-  "Behandle die Anfrage wie eine Suchmaschine: Suche die Begriffe wörtlich und liefere Seiten, die genau diese Begriffe behandeln. Steht die Anfrage für ein Unternehmen oder eine Marke mit eigener Website, muss deren offizielle Website (z. B. google.com für „google“) das erste Ergebnis sein. Bei mehrdeutigen Begriffen liefere nicht nur Seiten eines einzigen Anbieters, sondern eine Mischung aus offizieller Seite und unabhängigen Seiten zum Begriff.",  `Ermittle bis zu ${SOURCE_COUNT} inhaltlich unterschiedliche, möglichst verlässliche Ergebnisse. Vermeide doppelte Seiten und breit verwandte Themen.`,  "Gib ausschließlich gültiges JSON zurück: {\"results\":[{\"title\":\"exakter Seitentitel\",\"url\":\"https://...\",\"description\":\"kurze deutsche Beschreibung\"}]}",
-  "Die Beschreibung muss in ein bis zwei Sätzen konkret erklären, warum genau dieses Ergebnis zur Suchanfrage passt. Keine allgemeine Zusammenfassung der ganzen Suche.",
+  "Behandle die Anfrage wie eine Suchmaschine: Suche die Begriffe wörtlich und liefere Seiten, die genau diese Begriffe behandeln. Steht die Anfrage für ein Unternehmen oder eine Marke mit eigener Website, muss deren offizielle Website (z. B. google.com für „google“) das erste Ergebnis sein. Bei mehrdeutigen Begriffen liefere nicht nur Seiten eines einzigen Anbieters, sondern eine Mischung aus offizieller Seite und unabhängigen Seiten zum Begriff.",  `Ermittle bis zu ${SOURCE_COUNT} inhaltlich unterschiedliche, möglichst verlässliche Ergebnisse. Vermeide doppelte Seiten und breit verwandte Themen.`,  "Gib ausschließlich gültiges JSON ohne Codeblock und ohne weiteren Text zurück: {\"results\":[{\"title\":\"exakter Seitentitel\",\"url\":\"https://...\",\"description\":\"kurze deutsche Beschreibung\"}]}",
+  "Die Beschreibung ist ein einziger Satz mit höchstens 15 Wörtern und erklärt konkret, warum genau dieses Ergebnis zur Suchanfrage passt. Keine allgemeine Zusammenfassung der ganzen Suche.",
+  "Kennzeichne den Namen der beschriebenen Organisation, Person oder Marke am Anfang der Beschreibung mit Markdown-Fettschrift, z. B. \"**SRH Holding**\".",
 ].join("\n");
 
 
-// Bevorzugt Perplexity direkt; nutzt andernfalls den vorhandenen OpenRouter-Key.
-export function pickPerplexity(providers) {
-  const keyed = providers.filter((provider) => provider.apiKey);
-  return keyed.find((provider) =>
-    provider.id === "perplexity"
-    || /api\.perplexity\.ai/.test(provider.baseUrl ?? "")
-  ) ?? keyed.find((provider) =>
+export function pickOpenRouter(providers) {
+  return providers.find((provider) =>
+    provider.apiKey && (
     provider.id === "openrouter"
     || /openrouter\.ai/.test(provider.baseUrl ?? "")
+    )
   ) ?? null;
 }
 
@@ -30,14 +28,6 @@ export function pickBrave(providers) {
       || /api\.search\.brave\.com/.test(provider.baseUrl ?? "")
     )
   ) ?? null;
-}
-
-function isDirectPerplexity(baseUrl) {
-  return /^https:\/\/api\.perplexity\.ai\/?$/.test(baseUrl ?? "");
-}
-
-function searchModel(baseUrl) {
-  return isDirectPerplexity(baseUrl) ? "sonar" : "perplexity/sonar";
 }
 
 function validUrl(value) {
@@ -100,7 +90,9 @@ function parseStructuredResults(content) {
 function annotationResults(annotations) {
   const results = new Map();
   for (const annotation of annotations) {
-    const citation = annotation?.url_citation;
+    const citation = annotation?.url_citation ?? (
+      annotation?.type === "url_citation" ? annotation : null
+    );
     const url = validUrl(citation?.url)?.href;
     const key = resultKey(url);
     if (annotation?.type !== "url_citation" || !key || results.has(key)) continue;
@@ -138,65 +130,138 @@ function mergeCitations(annotations, content) {
 export async function searchWeb({ baseUrl, apiKey, query }) {
   let response;
   try {
-    response = await fetch(perplexityEndpoint(baseUrl), {
+    response = await fetch(openRouterResponsesEndpoint(baseUrl), {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify({
-        model: searchModel(baseUrl),
-        messages: [
-          { role: "system", content: SEARCH_SYSTEM },
-          { role: "user", content: query },
-        ],
-        max_tokens: SEARCH_MAX_TOKENS,
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "web_results",
-            schema: {
-              type: "object",
-              properties: {
-                results: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      title: { type: "string" },
-                      url: { type: "string" },
-                      description: { type: "string" },
-                    },
-                    required: ["title", "url", "description"],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["results"],
-              additionalProperties: false,
-            },
+        model: "google/gemini-3.5-flash",
+        instructions: SEARCH_SYSTEM,
+        input: query,
+        tools: [{
+          type: "openrouter:web_search",
+          parameters: {
+            engine: "exa",
+            mode: "instant",
+            max_results: SOURCE_COUNT,
+            max_total_results: SOURCE_COUNT,
+            max_characters: 500,
           },
-        },
+        }],
+        max_tool_calls: 1,
+        max_output_tokens: SEARCH_MAX_TOKENS,
         temperature: 0,
-        stream: false,
       }),
     });
   } catch {
-    throw new Error("Perplexity ist nicht erreichbar.");
+    throw new Error("OpenRouter ist nicht erreichbar.");
   }
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 300);
-    throw new Error(`Perplexity antwortet mit HTTP ${response.status}: ${detail}`);
+    throw new Error(`OpenRouter antwortet mit HTTP ${response.status}: ${detail}`);
   }
 
-  const data = await response.json();
-  const message = data.choices?.[0]?.message ?? {};
-  const answer = message.content ?? "";
-  return { answer, citations: promoteOfficialSite(query, mergeCitations(message.annotations ?? [], answer)) };
+  const { answer, annotations } = parseResponsesResult(await response.json());
+  return { answer, citations: promoteOfficialSite(query, mergeCitations(annotations, answer)) };
 }
 
-function perplexityEndpoint(baseUrl) {
-  if (isDirectPerplexity(baseUrl)) {
-    return "/api/perplexity/chat/completions";
+export async function searchWebBrave({ apiKey, query }) {
+  const url = `/api/search/brave?q=${encodeURIComponent(query)}`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    throw new Error(`Brave Search antwortet mit HTTP ${response.status}: ${detail}`);
   }
-  return `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const data = await response.json();
+  const citations = (data?.web?.results ?? [])
+    .map((entry) => ({
+      title: cleanText(entry?.title, TITLE_MAX_CHARS),
+      url: validUrl(entry?.url)?.href ?? "",
+      content: cleanText(entry?.description),
+    }))
+    .filter((entry) => entry.url)
+    .slice(0, SOURCE_COUNT);
+  return { answer: "", citations: promoteOfficialSite(query, citations) };
+}
+
+const PLACES_COUNT = 6;
+const PLACES_SYSTEM = [
+  "Du bist eine Ortssuche für medizinische Einrichtungen (Ärzte, Praxen, Zahnärzte, Kliniken, Krankenhäuser, Apotheken, Therapeuten).",
+  `Liefere bis zu ${PLACES_COUNT} real existierende Einrichtungen, die zur Anfrage passen, und nur solche mit vollständiger, verifizierbarer Straßenadresse. Erfinde nichts.`,
+  "Gib ausschließlich gültiges JSON ohne Codeblock und ohne weiteren Text zurück: {\"places\":[{\"name\":\"Name der Einrichtung\",\"address\":\"Straße Hausnummer, PLZ Ort\",\"website\":\"https://... oder leer\",\"type\":\"z. B. Zahnarzt, Klinik, Apotheke\"}]}",
+].join("\n");
+
+// Medizinische Orte über OpenRouter; die Adressen werden anschließend geokodiert.
+export async function searchPlaces({ baseUrl, apiKey, query }) {
+  let response;
+  try {
+    response = await fetch(openRouterResponsesEndpoint(baseUrl), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: "google/gemini-3.5-flash",
+        instructions: PLACES_SYSTEM,
+        input: query,
+        tools: [{
+          type: "openrouter:web_search",
+          parameters: {
+            engine: "exa",
+            mode: "instant",
+            max_results: PLACES_COUNT,
+            max_total_results: PLACES_COUNT,
+            max_characters: 500,
+          },
+        }],
+        max_tool_calls: 1,
+        max_output_tokens: SEARCH_MAX_TOKENS,
+        temperature: 0,
+      }),
+    });
+  } catch {
+    throw new Error("OpenRouter ist nicht erreichbar.");
+  }
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+    throw new Error(`OpenRouter antwortet mit HTTP ${response.status}: ${detail}`);
+  }
+
+  const { answer: content } = parseResponsesResult(await response.json());
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+  if (start < 0 || end <= start) return [];
+  try {
+    const parsed = JSON.parse(content.slice(start, end + 1));
+    return (Array.isArray(parsed.places) ? parsed.places : [])
+      .map((entry) => ({
+        name: cleanText(entry?.name, TITLE_MAX_CHARS),
+        address: cleanText(entry?.address, TITLE_MAX_CHARS),
+        website: validUrl(entry?.website)?.href ?? "",
+        type: cleanText(entry?.type, 60),
+      }))
+      .filter((entry) => entry.name && entry.address)
+      .slice(0, PLACES_COUNT);
+  } catch {
+    return [];
+  }
+}
+
+function openRouterResponsesEndpoint(baseUrl) {
+  return `${baseUrl.replace(/\/+$/, "")}/responses`;
+}
+
+function parseResponsesResult(data) {
+  const output = Array.isArray(data?.output) ? data.output : [];
+  const parts = output
+    .filter((item) => item?.type === "message")
+    .flatMap((item) => Array.isArray(item.content) ? item.content : []);
+  return {
+    answer: parts
+      .filter((part) => part?.type === "output_text" && typeof part.text === "string")
+      .map((part) => part.text)
+      .join("\n"),
+    annotations: parts.flatMap((part) => Array.isArray(part.annotations) ? part.annotations : []),
+  };
 }
 
 function imageHit(imageUrl, pageUrl, title, query) {
@@ -322,7 +387,7 @@ export async function searchImages({ braveApiKey = "", query }) {
 
 // Quellen für den Chat: jeder Web-Treffer ist eine nummerierte Quelle mit seinem Ausschnitt.
 export async function retrieveSources(question, provider) {
-  if (!provider?.apiKey) throw new Error("Kein API-Key für Perplexity oder OpenRouter.");
+  if (!provider?.apiKey) throw new Error("Kein API-Key für OpenRouter.");
   const { citations } = await searchWeb({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, query: question });
   const sources = citations.slice(0, SOURCE_COUNT).map((citation, index) => ({
     n: index + 1,
